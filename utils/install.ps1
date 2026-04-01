@@ -14,7 +14,7 @@ if (-not $git) {
 
 if (-not [Directory]::Exists($InstallDir)) {
 	$null = New-Item -Path $InstallDir -ItemType Directory
-	& $git clone --depth 1 'http://192.168.178.42/dxizx/poshtools2.git' $InstallDir
+	& $git clone --depth 1 'https://github.com/denchInside/poshtools2.git' $InstallDir
 }
 
 & $poshtools2 Update

@@ -12,4 +12,4 @@ Collection of unix-like tools, helpers, and reimplementations for PowerShell 7.
 Run in PowerShell 7:
 
 ```powershell
-& ([scriptblock]::Create((irm http://192.168.178.42/dxizx/poshtools2/raw/branch/main/utils/install.ps1)))
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/denchInside/poshtools2/refs/heads/main/utils/install.ps1)))
