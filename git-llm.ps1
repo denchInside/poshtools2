@@ -34,15 +34,10 @@ If the diff contains multiple unrelated changes, produce a short, combined summa
 			if (Ask-User "run 'git add .'?") {
 				$null = git -C "$pwd" add .
 			}
-			$excludePatterns = @(
-				'*.lock', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-				'*.min.js', '*.min.css', '*.map', 'dist/*', 'build/*'
-			)
-			$pathspecExclude = $excludePatterns | ForEach-Object { ":(exclude)$_" }
-
-			$diff = (git -C "$pwd" --no-pager diff --cached -U1 -- . $pathspecExclude) -join "`n"
 
 			$maxChars = 1000
+			$diff = (git -C "$pwd" --no-pager diff --cached -U1) -join "`n"
+
 			if ($diff.Length -gt $maxChars) {
 				$diff = $diff.Substring(0, $maxChars) + "`n[... truncated]"
 			}
