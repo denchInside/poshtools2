@@ -1,3 +1,5 @@
+using namespace System.Collections.Generic
+
 param(
 	[ValidateSet("review")]
 	[Parameter(Mandatory = $true)]
@@ -34,15 +36,48 @@ If the diff contains multiple unrelated changes, produce a short, combined summa
 			if (Ask-User "run 'git add .'?") {
 				$null = git -C "$pwd" add .
 			}
+			
+			$groupDiffs = @{}
+			$groupCurrent = "unknown"
+			$bigDiff = git -C "$pwd" --no-pager diff --cached -U1
 
+			$nowChars = 0
 			$maxChars = 1000
-			$diff = (git -C "$pwd" --no-pager diff --cached -U1) -join "`n"
+			$newLineLength = [Environment]::NewLine.Length
+			
+			# diff grouping by '^@@ .* @@'
+			foreach ($line in $bigDiff) {				
+				if ($line -match '^@@ .* @@') {
+					$groupCurrent = $line
+				}
+				if (-not $groupDiffs.ContainsKey($groupCurrent)) {
+					$groupDiffs[$groupCurrent] = [LinkedList[String]]::new()
+				}
 
-			if ($diff.Length -gt $maxChars) {
-				$diff = $diff.Substring(0, $maxChars) + "`n[... truncated]"
+				$null = $groupDiffs[$groupCurrent].AddLast($line)
+				$nowChars += $line.Length + $newLineLength
 			}
-
-			$diff
+			
+			# line deletion (prioritizes the biggest group)
+			while ($nowChars -gt $maxChars) {
+				$maxCount = ($groupDiffs.Values |
+					Measure-Object -Property Count -Maximum).Maximum
+				
+				foreach ($group in $groupDiffs.Values) {
+					if ($nowChars -le $maxChars) { break }
+					
+					if ($group.Count -ge $maxCount) {
+						$nowChars -= $group.Last.Value.Length + $newLineLength
+						$group.RemoveLast()
+					}
+				}
+			}
+			
+			$strDiff = $groupDiffs.Values |
+				ForEach-Object { $_ } |
+				Out-String
+			
+			$strDiff
 		}
 	}
 }
