@@ -18,7 +18,7 @@ class LLM_Dialogue {
 	
 	LLM_Dialogue([LLM_Credentials]$Credentials, [String]$SystemPrompt) {
 		$this.Credentials = $Credentials
-		$this.Mode = "speed"
+		$this.Mode = "quality"
 		$this.SystemPrompt = $SystemPrompt
 		$this.Search = $false
 		$this.History = [LinkedList[HashTable]]::new()
