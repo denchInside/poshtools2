@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $WarningPreference = 'SilentlyContinue'
 
 class LLM_Credentials {
-	[String]$Host
+	[String]$HostName
 	[String]$Secret
 }
 
@@ -56,7 +56,7 @@ class LLM_Dialogue {
 		
 		$uri = [String]::Format(
 			"http://{0}/api?mode={1}&strict=false&search={2}",
-			$this.Credentials.Host,
+			$this.Credentials.HostName,
 			$this.Mode.ToLowerInvariant(),
 			$this.Search ? "true" : "false"
 		)
@@ -114,30 +114,38 @@ function Get-LLM_Credentials {
 		[String]$FileName,
 		[String]$Username,
 		[String]$Password,
-		[String]$Host = "31.57.46.139:5050"
+		[String]$HostName
 	)
-	
-	$save = $FileName -and [File]::Exists($FileName) `
-		? (Get-Content -LiteralPath $FileName -Raw -Encoding utf8 | ConvertFrom-Json) `
-		: ([PSObject]@{})
-	
+
+	$save = if ($FileName -and [File]::Exists($FileName)) {
+		Get-Content -LiteralPath $FileName -Raw -Encoding utf8 | ConvertFrom-Json
+	} else {
+		[PSObject]@{}
+	}
+
 	$credentials = $Script:CredentialsFactory.Invoke()
-	$credentials.Host = if ($Host) { $Host } else { $save.Host }
+	
+	$credentials.HostName = if ($HostName) {
+		$HostName
+	} else {
+		$save.HostName
+	}
+	
 	$credentials.Secret = $save.Secret
 
 	if (-not $credentials.Secret) {
-		if (-not $credentials.Host) { $credentials.Host = Read-Host "host" }
-		if (-not $credentials.Host) { throw "cannot use empty host" }
-		
+		if (-not $credentials.HostName) { $credentials.HostName = Read-Host "host" }
+		if (-not $credentials.HostName) { throw "cannot use empty host" }
+	
 		if (-not $Username) { $Username = Read-Host "username" }
 		if (-not $Username) { throw "cannot use empty username" }
-
+	
 		if (-not $Password) { $Password = Read-Host "password" -MaskInput }
 		if (-not $Password) { throw "cannot use empty password" }
 		
 		$loginUri = [String]::Format(
 			"http://{0}/auth/login",
-			$credentials.Host
+			$credentials.HostName
 		)
 		$loginBody = [PSObject]@{
 			"username" = $Username
@@ -153,8 +161,12 @@ function Get-LLM_Credentials {
 	}
 	
 	if ($FileName) {
-		$null = New-Item "$FileName\..\" -ItemType Directory -ErrorAction SilentlyContinue
-		($credentials | ConvertTo-Json) > $FileName
+		$dataDirName = [Path]::GetDirectoryName($FileName)
+		$null = New-Item -Path $dataDirName -ItemType Directory -ErrorAction SilentlyContinue
+		
+		$credentials |
+			ConvertTo-Json |
+			Out-File -LiteralPath $FileName -Encoding utf8
 	}
 	
 	return $credentials
