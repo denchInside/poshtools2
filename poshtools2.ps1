@@ -33,10 +33,12 @@ function Category-DeveloperMode {
     
     switch ($DeveloperMode) {
         "Disable" {
+            $null = git remote set-url origin 'https://github.com/denchInside/poshtools2.git'
             Remove-Item -LiteralPath $GuardFile -ErrorAction SilentlyContinue
             Write-Output "Developer mode is disabled. Repository can update now."
         }
         "Enable" {
+            $null = git remote set-url origin 'git@github.com:denchInside/poshtools2.git'
             New-Item -Path $GuardFile -ItemType File -ErrorAction SilentlyContinue | Out-Null
             Write-Host "Developer mode is enabled. Modifications are now secured."
         }
