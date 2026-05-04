@@ -7,18 +7,17 @@ $WarningPreference = 'SilentlyContinue'
 class LLM_Credentials {
     [String]$HostName
     [String]$Secret
+    [String]$Model
 }
 
 class LLM_Dialogue {
     [LLM_Credentials]$Credentials
-    [String]$Mode
     [String]$SystemPrompt
     [Boolean]$Search
     [LinkedList[HashTable]]$History
     
     LLM_Dialogue([LLM_Credentials]$Credentials, [String]$SystemPrompt) {
         $this.Credentials = $Credentials
-        $this.Mode = "quality"
         $this.SystemPrompt = $SystemPrompt
         $this.Search = $false
         $this.History = [LinkedList[HashTable]]::new()
@@ -36,17 +35,10 @@ class LLM_Dialogue {
         })
     }
     
-    [void] SetMode([String]$Mode) {
-        if ($Mode -notin "speed", "quality") {
-            throw "invalid mode: choose 'speed' or 'quality'"
-        }
-        $this.Mode = $Mode
-    }
-
     [void] SetSearch([Boolean]$Search) {
         $this.Search = $Search
     }
-
+    
     [String] Ask([String]$Prompt) {
         if (-not $Prompt) {
             throw "no prompt provided"
@@ -55,22 +47,25 @@ class LLM_Dialogue {
         $this.Append("user", $Prompt)
         
         $uri = [String]::Format(
-            "http://{0}/api?mode={1}&strict=false&search={2}",
-            $this.Credentials.HostName,
-            $this.Mode.ToLowerInvariant(),
-            $this.Search ? "true" : "false"
+            "http://{0}/v1/chat/completions",
+            $this.Credentials.HostName
         )
         
-        $result = $this.History |
-            Select-Object role, content |
-            ConvertTo-Json -Compress |
+        $payload = [PSObject]@{
+            model = $this.Credentials.Model
+            messages = $this.History | Select-Object role, content
+            stream = $false
+        }
+        
+        $result = $payload |
+            ConvertTo-Json -Depth 10 -Compress |
             Invoke-RestMethod `
                 -Uri $uri `
                 -Method Post `
                 -ContentType "application/json" `
-                -Headers @{ "X-Auth-Token" = $this.Credentials.Secret }
+                -Headers @{ "Authorization" = "Bearer $($this.Credentials.Secret)" }
         
-        $response = $result.Content
+        $response = $result.choices[0].message.content
         $this.Append("assistant", $response -or "<no response>")
         return $response
     }
@@ -92,6 +87,7 @@ class LLM_Dialogue {
     }
 }
 
+
 $Script:DialogueFactory = [LLM_Dialogue]::new
 $Script:CredentialsFactory = [LLM_Credentials]::new
 
@@ -112,17 +108,16 @@ function New-LLM_Dialogue {
 function Get-LLM_Credentials {
     param(
         [String]$FileName,
-        [String]$Username,
-        [String]$Password,
-        [String]$HostName
+        [String]$HostName,
+        [String]$Model
     )
-
+    
     $save = if ($FileName -and [File]::Exists($FileName)) {
         Get-Content -LiteralPath $FileName -Raw -Encoding utf8 | ConvertFrom-Json
     } else {
         [PSObject]@{}
     }
-
+    
     $credentials = $Script:CredentialsFactory.Invoke()
     
     $credentials.HostName = if ($HostName) {
@@ -132,32 +127,23 @@ function Get-LLM_Credentials {
     }
     
     $credentials.Secret = $save.Secret
-
+    $credentials.Model = if ($Model) {
+        $Model
+    } else {
+        $save.Model
+    }
+    
     if (-not $credentials.Secret) {
         if (-not $credentials.HostName) { $credentials.HostName = Read-Host "host" }
         if (-not $credentials.HostName) { throw "cannot use empty host" }
     
-        if (-not $Username) { $Username = Read-Host "username" }
-        if (-not $Username) { throw "cannot use empty username" }
-    
-        if (-not $Password) { $Password = Read-Host "password" -MaskInput }
-        if (-not $Password) { throw "cannot use empty password" }
-        
-        $loginUri = [String]::Format(
-            "http://{0}/auth/login",
-            $credentials.HostName
-        )
-        $loginBody = [PSObject]@{
-            "username" = $Username
-            "password" = $Password
-        } | ConvertTo-Json -Compress
-        
-        $credentials.Secret = $loginBody |
-            Invoke-RestMethod `
-                -Uri $loginUri `
-                -Method Post `
-                -ContentType "application/json" |
-            Select-Object -ExpandProperty token
+        $credentials.Secret = Read-Host "secret"
+        if (-not $credentials.Secret) { throw "cannot use empty secret" }
+    }
+
+    if (-not $credentials.Model) {
+        $credentials.Model = Read-Host "model"
+        if (-not $credentials.Model) { throw "cannot use empty model" }
     }
     
     if ($FileName) {
@@ -171,5 +157,6 @@ function Get-LLM_Credentials {
     
     return $credentials
 }
+
 
 Export-ModuleMember -Function New-LLM_Dialogue, Get-LLM_Credentials

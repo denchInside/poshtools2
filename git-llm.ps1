@@ -89,7 +89,6 @@ $prompt = & $Prompts[$Action].Command
 if ($prompt) {
     $credentials = Get-LLM_Credentials "$PSScriptRoot\.data\llm.json"
     $dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $Prompts[$Action].SystemPrompt
-    $dialogue.SetMode("speed")
     Write-Output $dialogue.Ask("$prompt")
 } else {
     Write-Output "nothing to do."

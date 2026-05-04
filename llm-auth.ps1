@@ -1,7 +1,7 @@
 param(
     [String]$Username,
     [String]$Password,
-    [String]$HostName = "31.57.46.139:5050",
+    [String]$HostName,
     [String]$CredentialsFile = "$PSScriptRoot\.data\llm.json",
     [switch]$Reset
 )
