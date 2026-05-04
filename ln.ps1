@@ -4,23 +4,23 @@ using namespace System.IO
 param(
     [Parameter(Position=0, Mandatory=$false)]
     [string] $Source,
-	
+    
     [Parameter(Position=1, Mandatory=$false)]
     [string] $Destination,
     
-	[Parameter(Mandatory=$false)]
-	[switch]$Junction,
-	
-	[Parameter(Mandatory=$false)]
-	[switch]$Hard
+    [Parameter(Mandatory=$false)]
+    [switch]$Junction,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Hard
 )
 
 $ErrorActionPreference = "Stop"
 
 # Usage on empty/incomplete params
 if (-not $Source -or -not $Destination) {
-	Write-Host "usage: ln.ps1 [-J|-H] <Source> <Destination>"
-	exit 0
+    Write-Host "usage: ln.ps1 [-J|-H] <Source> <Destination>"
+    exit 0
 }
 
 # Link type
@@ -29,9 +29,9 @@ $linkType = 'SymbolicLink'
 if ($Junction -and $Hard) {
     Write-Error "can not apply both -Junction and -Hard"
 } elseif ($Junction) {
-	$linkType = 'Junction'
+    $linkType = 'Junction'
 } elseif ($Hard) {
-	$linkType = 'HardLink'
+    $linkType = 'HardLink'
 }
 
 # Dest should not exist
@@ -51,9 +51,9 @@ $linkFullPath = [System.IO.Path]::GetFullPath($Destination)
 
 # Determine link type
 if ($Junction -and $sourceInfo -isnot [DirectoryInfo]) {
-	Write-Error "can not create junction to a file"
+    Write-Error "can not create junction to a file"
 } elseif ($Hard -and $sourceInfo -isnot [FileInfo]) {
-	Write-Error "can not create hardlink to a directory"
+    Write-Error "can not create hardlink to a directory"
 }
 
 $linkInfo = New-Item -ItemType $linkType -Path $linkFullPath -Target $sourceInfo.FullName #-ErrorAction SilentlyContinue

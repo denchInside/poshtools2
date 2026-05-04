@@ -17,7 +17,7 @@ $credentials = Get-LLM_Credentials "$PSScriptRoot\.data\llm.json"
 $dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $prompt
 
 while ($true) {
-	$question = Read-Host 'You'
-	if (-not $question) { continue }
-	Write-Host 'LLM:' ($dialogue.Ask($question))
+    $question = Read-Host 'You'
+    if (-not $question) { continue }
+    Write-Host 'LLM:' ($dialogue.Ask($question))
 }

@@ -1,7 +1,7 @@
 param(
-	$Question,
-	[switch]$Reset,
-	[switch]$ShowHistory
+    $Question,
+    [switch]$Reset,
+    [switch]$ShowHistory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,68 +34,68 @@ NEVER do the following:
 '@
 
 if (-not $global:__qq_Data) {
-	$credentials = Get-LLM_Credentials "$PSScriptRoot\.data\llm.json"
-	$global:__qq_Data = [PSObject]@{
-		Dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $Instruction
-		LastCommandID = 0
-	}
+    $credentials = Get-LLM_Credentials "$PSScriptRoot\.data\llm.json"
+    $global:__qq_Data = [PSObject]@{
+        Dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $Instruction
+        LastCommandID = 0
+    }
 }
 $data = $global:__qq_Data
 $dialogue = $data.Dialogue
 
 if ($History -or $Reset) {
-	if ($ShowHistory) {
-		Write-Output $dialogue.History
-	}
-	if ($Reset) {
-		$dialogue.Clear()
-		Write-Output "Context cleared successfully."
-	}
-	exit
+    if ($ShowHistory) {
+        Write-Output $dialogue.History
+    }
+    if ($Reset) {
+        $dialogue.Clear()
+        Write-Output "Context cleared successfully."
+    }
+    exit
 }
 
 $dialogue.Compact({
-	param($message)
-	$minTime = [DateTime]::Now - [TimeSpan]::FromHours(3)
-	return $message.time -ge $minTime
+    param($message)
+    $minTime = [DateTime]::Now - [TimeSpan]::FromHours(3)
+    return $message.time -ge $minTime
 })
 
 if (-not $Question) {
-	$Question = Read-Host "Question"
-	if (-not $Question) { exit }
+    $Question = Read-Host "Question"
+    if (-not $Question) { exit }
 }
 elseif ($Question -is [ScriptBlock]) {
-	$realQuestion = Read-Host "Question"
-	$output = try { & $Question 2>&1 | Out-String } catch { "$_" }
-	$output = "Code provided by user:`n$Question`n`nCode output:`n$output"
-	if ($realQuestion) {
-		$Question = "User question:`n$realQuestion`n`n$output"
-	}
+    $realQuestion = Read-Host "Question"
+    $output = try { & $Question 2>&1 | Out-String } catch { "$_" }
+    $output = "Code provided by user:`n$Question`n`nCode output:`n$output"
+    if ($realQuestion) {
+        $Question = "User question:`n$realQuestion`n`n$output"
+    }
 }
 else {
-	$Question = "$Question"
+    $Question = "$Question"
 }
 
 $history = Get-History -Count 30 |
-	Where-Object -Property Id -GE $data.LastCommandID |
-	Where-Object { $_.CommandLine -notlike "qq*" }
+    Where-Object -Property Id -GE $data.LastCommandID |
+    Where-Object { $_.CommandLine -notlike "qq*" }
 
 $data.LastCommandID = $history |
-	Sort-Object -Property Id |
-	Select-Object -ExpandProperty Id -Last 1
+    Sort-Object -Property Id |
+    Select-Object -ExpandProperty Id -Last 1
 
 if ($history) {
-	$history = $history |
-		Foreach-Object {
-			[String]::Format(
-				"{0}`t{1}",
-				$_.StartExecutionTime.ToString("HH:mm"),
-				$_.CommandLine
-			)
-		}
+    $history = $history |
+        Foreach-Object {
+            [String]::Format(
+                "{0}`t{1}",
+                $_.StartExecutionTime.ToString("HH:mm"),
+                $_.CommandLine
+            )
+        }
 
-	$historyString = [String]::Join([Environment]::NewLine, $history)
-	$dialogue.Append("system", $historyString)
+    $historyString = [String]::Join([Environment]::NewLine, $history)
+    $dialogue.Append("system", $historyString)
 }
 
 Write-Output $dialogue.Ask($Question)

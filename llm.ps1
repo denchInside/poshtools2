@@ -1,11 +1,11 @@
 param(
-	[Parameter(Mandatory = $true)]
-	[String]$Prompt,
-	[String]$SystemPrompt,
-	[ValidateSet("quality", "speed")]
-	[String]$Mode = "speed",
-	[switch]$Search = $false,
-	[switch]$AsDialogue = $false
+    [Parameter(Mandatory = $true)]
+    [String]$Prompt,
+    [String]$SystemPrompt,
+    [ValidateSet("quality", "speed")]
+    [String]$Mode = "speed",
+    [switch]$Search = $false,
+    [switch]$AsDialogue = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,7 @@ $poshIsShit.SetSearch($Search)
 $text = $poshIsShit.Ask($Prompt)
 
 if ($AsDialogue) {
-	Write-Output $poshIsShit.History
+    Write-Output $poshIsShit.History
 } else {
-	Write-Output $text
+    Write-Output $text
 }

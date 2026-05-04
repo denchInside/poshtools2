@@ -1,6 +1,6 @@
 param(
-	[String]$Text,
-	[String]$Language
+    [String]$Text,
+    [String]$Language
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,12 +34,12 @@ Example for an ambiguous input:
 '@
 
 if (-not $Text) {
-	$Text = Read-Host "Original"
-	if (-not $Text) { exit }
+    $Text = Read-Host "Original"
+    if (-not $Text) { exit }
 }
 
 if (-not $Language) {
-	$Language = "auto"
+    $Language = "auto"
 }
 
 $Credentials = Get-LLM_Credentials "$PSScriptRoot\.data\llm.json"
