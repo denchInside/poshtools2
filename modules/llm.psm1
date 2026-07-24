@@ -105,11 +105,67 @@ function New-LLM_Dialogue {
     return $Script:DialogueFactory.Invoke($Credentials, $SystemPrompt)
 }
 
+function Read-LLM_Value {
+    param(
+        [String]$Prompt,
+        [String]$Default
+    )
+    
+    $label = if ($Default) { "$Prompt [$Default]" } else { $Prompt }
+    $value = Read-Host $label
+    
+    if (-not $value) {
+        return $Default
+    }
+    
+    return $value
+}
+
+function Get-LLM_ModelList {
+    param(
+        [String]$HostName,
+        [String]$Secret
+    )
+    
+    $uri = [String]::Format("http://{0}/v1", $HostName)
+    
+    $result = Invoke-RestMethod `
+        -Uri $uri `
+        -Method Get `
+        -ContentType "application/json" `
+        -Headers @{ "Authorization" = "Bearer $Secret" }
+    
+    return $result.data.id
+}
+
+function Select-LLM_Model {
+    param(
+        [String]$HostName,
+        [String]$Secret,
+        [String]$Default
+    )
+    
+    $ids = Get-LLM_ModelList -HostName $HostName -Secret $Secret
+    
+    $ids | ForEach-Object { Write-Host $_ }
+    
+    while ($true) {
+        $choice = Read-LLM_Value -Prompt "model" -Default $Default
+        
+        if ($choice -and $choice -in $ids) {
+            return $choice
+        }
+        
+        Write-Host "not a valid model id, pick one from the list above"
+    }
+}
+
 function Get-LLM_Credentials {
     param(
         [String]$FileName,
         [String]$HostName,
-        [String]$Model
+        [switch]$Reset,
+        [switch]$SelectModel
     )
     
     $save = if ($FileName -and [File]::Exists($FileName)) {
@@ -122,29 +178,31 @@ function Get-LLM_Credentials {
     
     $credentials.HostName = if ($HostName) {
         $HostName
+    } elseif ($Reset) {
+        Read-LLM_Value -Prompt "host" -Default $save.HostName
     } else {
         $save.HostName
     }
     
-    $credentials.Secret = $save.Secret
-    $credentials.Model = if ($Model) {
-        $Model
+    if (-not $credentials.HostName) { $credentials.HostName = Read-Host "host" }
+    if (-not $credentials.HostName) { throw "cannot use empty host" }
+    
+    $credentials.Secret = if ($Reset) {
+        Read-LLM_Value -Prompt "secret" -Default $save.Secret
+    } else {
+        $save.Secret
+    }
+    
+    if (-not $credentials.Secret) { $credentials.Secret = Read-Host "secret" }
+    if (-not $credentials.Secret) { throw "cannot use empty secret" }
+    
+    $credentials.Model = if ($SelectModel -or $Reset -or -not $save.Model) {
+        Select-LLM_Model -HostName $credentials.HostName -Secret $credentials.Secret -Default $save.Model
     } else {
         $save.Model
     }
     
-    if (-not $credentials.Secret) {
-        if (-not $credentials.HostName) { $credentials.HostName = Read-Host "host" }
-        if (-not $credentials.HostName) { throw "cannot use empty host" }
-    
-        $credentials.Secret = Read-Host "secret"
-        if (-not $credentials.Secret) { throw "cannot use empty secret" }
-    }
-
-    if (-not $credentials.Model) {
-        $credentials.Model = Read-Host "model"
-        if (-not $credentials.Model) { throw "cannot use empty model" }
-    }
+    if (-not $credentials.Model) { throw "cannot use empty model" }
     
     if ($FileName) {
         $dataDirName = [Path]::GetDirectoryName($FileName)
