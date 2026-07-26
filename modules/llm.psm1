@@ -14,12 +14,18 @@ class LLM_Dialogue {
     [LLM_Credentials]$Credentials
     [String]$SystemPrompt
     [Boolean]$Search
+    [Boolean]$Think
+    [Object[]]$Tools
+    [Object[]]$PendingToolCalls
     [LinkedList[HashTable]]$History
     
     LLM_Dialogue([LLM_Credentials]$Credentials, [String]$SystemPrompt) {
         $this.Credentials = $Credentials
         $this.SystemPrompt = $SystemPrompt
         $this.Search = $false
+        $this.Think = $false
+        $this.Tools = @()
+        $this.PendingToolCalls = @()
         $this.History = [LinkedList[HashTable]]::new()
         $this.Clear()
     }
@@ -39,39 +45,96 @@ class LLM_Dialogue {
         $this.Search = $Search
     }
     
+    [void] SetThink([Boolean]$Think) {
+        $this.Think = $Think
+    }
+    
+    [void] SetTools([Object[]]$Tools) {
+        $this.Tools = $Tools
+    }
+    
+    [void] SubmitToolResult([String]$ToolCallId, [String]$Name, [String]$Content) {
+        $this.History.Add([PSObject]@{
+            role = "tool"
+            content = $Content
+            tool_call_id = $ToolCallId
+            name = $Name
+            time = [DateTime]::Now
+        })
+    }
+    
     [String] Ask([String]$Prompt) {
         if (-not $Prompt) {
             throw "no prompt provided"
         }
         
+        $before = $this.History.Count
         $this.Append("user", $Prompt)
         
+        try {
+            return $this.Complete()
+        } catch {
+            while ($this.History.Count -gt $before) {
+                $this.History.RemoveLast()
+            }
+            throw
+        }
+    }
+    
+    [String] Complete() {
         $uri = [String]::Format(
             "http://{0}/v1/chat/completions",
             $this.Credentials.HostName
         )
         
-        $payload = [PSObject]@{
+        $messages = $this.History | ForEach-Object {
+            $message = [Ordered]@{ role = $_.role; content = $_.content }
+            if ($_.tool_call_id) { $message.tool_call_id = $_.tool_call_id }
+            if ($_.name) { $message.name = $_.name }
+            if ($_.tool_calls) { $message.tool_calls = $_.tool_calls }
+            $message
+        }
+        
+        $payload = [Ordered]@{
             model = $this.Credentials.Model
-            messages = $this.History | Select-Object role, content
+            messages = $messages
             stream = $false
         }
         
-        $result = $payload |
-            ConvertTo-Json -Depth 10 -Compress |
-            Invoke-RestMethod `
-                -Uri $uri `
-                -Method Post `
-                -ContentType "application/json" `
-                -Headers @{ "Authorization" = "Bearer $($this.Credentials.Secret)" }
+        if ($this.Search) { $payload.search = $true }
+        if ($this.Think) { $payload.reasoning_effort = "high" }
+        if ($this.Tools -and $this.Tools.Count -gt 0) { $payload.tools = $this.Tools }
         
-        $response = $result.choices[0].message.content
-        $this.Append("assistant", $response -or "<no response>")
-        return $response
+        $result = try {
+            $payload |
+                ConvertTo-Json -Depth 10 -Compress |
+                Invoke-RestMethod `
+                    -Uri $uri `
+                    -Method Post `
+                    -ContentType "application/json" `
+                    -Headers @{ "Authorization" = "Bearer $($this.Credentials.Secret)" }
+        } catch {
+            throw ConvertTo-LLM_ErrorMessage $_
+        }
+        
+        $message = $result.choices[0].message
+        $content = if ($message.content) { $message.content } else { "" }
+        
+        $this.PendingToolCalls = @($message.tool_calls)
+        
+        $this.History.Add([PSObject]@{
+            role = "assistant"
+            content = $content
+            tool_calls = $message.tool_calls
+            time = [DateTime]::Now
+        })
+        
+        return $content
     }
     
     [void] Clear() {
         $this.History.Clear()
+        $this.PendingToolCalls = @()
         $this.Append("system", $this.SystemPrompt)
     }
     
@@ -87,6 +150,28 @@ class LLM_Dialogue {
     }
 }
 
+
+function ConvertTo-LLM_ErrorMessage {
+    param(
+        $ErrorRecord
+    )
+    
+    $body = $ErrorRecord.ErrorDetails.Message
+    $parsed = if ($body) { try { $body | ConvertFrom-Json } catch { $null } } else { $null }
+    
+    if (-not $parsed) {
+        return $ErrorRecord.Exception.Message
+    }
+    
+    $message = if ($parsed.error.message) { $parsed.error.message } else { "request failed" }
+    $failedGeneration = $parsed.upstream_details.error.failed_generation
+    
+    if ($failedGeneration) {
+        return "$message`nmodel produced: $failedGeneration"
+    }
+    
+    return $message
+}
 
 $Script:DialogueFactory = [LLM_Dialogue]::new
 $Script:CredentialsFactory = [LLM_Credentials]::new
