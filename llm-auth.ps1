@@ -1,20 +1,21 @@
+#Requires -Version 7.0
+
 param(
-    [String]$HostName,
-    [String]$CredentialsFile = "$PSScriptRoot\.data\llm.json",
-    [switch]$Reset,
-    [switch]$Model
+    [string] $HostName,
+    [string] $CredentialsFile = "$PSScriptRoot\.data\llm.json",
+    [switch] $Reset,
+    [switch] $Model
 )
 
-$ErrorActionPreference = 'Stop'
-$WarningPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop';
+$WarningPreference = 'SilentlyContinue';
 
-Import-Module "$PSScriptRoot\modules\llm.psm1" -Scope Local
+Import-Module "$PSScriptRoot\modules\llm.psm1" -Scope Local;
 
 $null = Get-LLM_Credentials `
     -FileName $CredentialsFile `
     -HostName $HostName `
     -Reset:$Reset `
-    -SelectModel:$Model
+    -SelectModel:$Model;
 
-
-Write-Output "authentication done."
+Write-Host 'authentication done.' -ForegroundColor Green;
