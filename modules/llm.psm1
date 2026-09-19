@@ -246,7 +246,7 @@ function Get-LLM_ModelList(
     [string] $Secret
 )
 {
-    $uri = [string]::Format('http://{0}/v1', $HostName);
+    $uri = [string]::Format('http://{0}/v1/models', $HostName);
 
     $result = Invoke-RestMethod `
         -Uri $uri `
