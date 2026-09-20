@@ -2,6 +2,7 @@
 
 using namespace System.IO
 using namespace System.Collections.Generic
+using namespace System.Runtime.InteropServices
 
 $ErrorActionPreference = 'Stop';
 $WarningPreference = 'SilentlyContinue';
@@ -100,15 +101,15 @@ class LLM_Dialogue
 
     [string] Complete()
     {
-        $uri = [string]::Format('http://{0}/v1/chat/completions', $this.Credentials.HostName);
+        $uri = Get-LLM_Uri -HostName $this.Credentials.HostName -Path '/v1/chat/completions';
 
-        $messages = $this.History | ForEach-Object {
+        $messages = @($this.History | ForEach-Object {
             $message = [ordered]@{ role = $_.role; content = $_.content };
             if ($_.tool_call_id) { $message.tool_call_id = $_.tool_call_id; }
             if ($_.name) { $message.name = $_.name; }
             if ($_.tool_calls) { $message.tool_calls = $_.tool_calls; }
             $message
-        };
+        });
 
         $payload = [ordered]@{
             model = $this.Credentials.Model
@@ -135,10 +136,15 @@ class LLM_Dialogue
             throw (ConvertTo-LLM_ErrorMessage $_);
         }
 
+        if (-not $result.choices)
+        {
+            throw 'the model returned no choices';
+        }
+
         $message = $result.choices[0].message;
         $content = $message.content ? $message.content : '';
 
-        $this.PendingToolCalls = @($message.tool_calls);
+        $this.PendingToolCalls = $message.tool_calls ? @($message.tool_calls) : @();
 
         $this.History.Add([pscustomobject]@{
             role = 'assistant'
@@ -159,15 +165,21 @@ class LLM_Dialogue
 
     [void] Compact([scriptblock] $strategy)
     {
-        $node = $this.History.First;
+        $node = $this.History.First.Next;
 
-        while ($next = $node.Next)
+        while ($node)
         {
-            if (-not (& $strategy $next.Value))
+            $next = $node.Next;
+            if (-not (& $strategy $node.Value))
             {
-                $this.History.Remove($next);
+                $this.History.Remove($node);
             }
-            $node = $node.Next;
+            $node = $next;
+        }
+
+        while ($this.History.First.Next -and $this.History.First.Next.Value.role -eq 'tool')
+        {
+            $this.History.Remove($this.History.First.Next);
         }
     }
 }
@@ -204,6 +216,26 @@ function ConvertTo-LLM_ErrorMessage($ErrorRecord)
 $Script:DialogueFactory = [LLM_Dialogue]::new;
 $Script:CredentialsFactory = [LLM_Credentials]::new;
 
+function Get-LLM_Uri(
+    [string] $HostName,
+    [string] $Path
+)
+{
+    <#
+    .SYNOPSIS
+        Builds the request uri for an API path on the given host.
+    .PARAMETER HostName
+        Either host[:port], which is reached over http, or a full origin such
+        as https://example.com, which is used as given.
+    .PARAMETER Path
+        The absolute API path, for example /v1/models.
+    #>
+
+    $base = ($HostName -match '^https?://') ? $HostName.TrimEnd('/') : "http://$HostName";
+
+    return [string]::Format('{0}{1}', $base, $Path);
+}
+
 function New-LLM_Dialogue(
     [Parameter(Mandatory)]
     [LLM_Credentials] $Credentials,
@@ -232,11 +264,13 @@ function New-LLM_Dialogue(
 
 function Read-LLM_Value(
     [string] $Prompt,
-    [string] $Default
+    [string] $Default,
+    [switch] $Mask
 )
 {
-    $label = $Default ? "$Prompt [$Default]" : $Prompt;
-    $value = Read-Host $label;
+    $shown = $Mask ? '****' : $Default;
+    $label = $Default ? "$Prompt [$shown]" : $Prompt;
+    $value = $Mask ? (Read-Host $label -MaskInput) : (Read-Host $label);
 
     return $value ? $value : $Default;
 }
@@ -246,7 +280,7 @@ function Get-LLM_ModelList(
     [string] $Secret
 )
 {
-    $uri = [string]::Format('http://{0}/v1/models', $HostName);
+    $uri = Get-LLM_Uri -HostName $HostName -Path '/v1/models';
 
     $result = Invoke-RestMethod `
         -Uri $uri `
@@ -320,12 +354,12 @@ function Get-LLM_Credentials(
     if (-not $credentials.HostName) { throw [System.ArgumentException]::new('cannot use empty host', 'HostName'); }
 
     $credentials.Secret = if ($Reset) {
-        Read-LLM_Value -Prompt 'secret' -Default $save.Secret
+        Read-LLM_Value -Prompt 'secret' -Default $save.Secret -Mask
     } else {
         $save.Secret
     }
 
-    if (-not $credentials.Secret) { $credentials.Secret = Read-Host 'secret'; }
+    if (-not $credentials.Secret) { $credentials.Secret = Read-LLM_Value -Prompt 'secret' -Mask; }
     if (-not $credentials.Secret) { throw [System.ArgumentException]::new('cannot use empty secret', 'Secret'); }
 
     $credentials.Model = if ($SelectModel -or $Reset -or -not $save.Model) {
@@ -353,19 +387,19 @@ function Get-LLM_WorkspaceState()
 {
     <#
     .SYNOPSIS
-        Returns a short line describing the current directory and, if it is
-        a git repository, the current branch. Used to ground the model in
-        where it actually is before it proposes its first command.
+        Returns a short line describing the environment the model is working
+        in: date, operating system, shell version, current directory and, if
+        inside a git repository, the current branch. Used to ground the model
+        before it proposes its first command.
     #>
 
+    $date = [datetime]::Now.ToString('yyyy-MM-dd');
+    $os = [RuntimeInformation]::OSDescription;
     $location = (Get-Location).Path;
-    $line = "cwd: $location";
+    $line = "date: $date | os: $os | shell: PowerShell $($PSVersionTable.PSVersion) | cwd: $location";
 
-    if (Test-Path -LiteralPath (Join-Path $location '.git'))
-    {
-        $branch = try { git rev-parse --abbrev-ref HEAD 2>$null } catch { $null }
-        if ($branch) { $line += " | git branch: $branch"; }
-    }
+    $branch = try { git rev-parse --abbrev-ref HEAD 2>$null } catch { $null }
+    if ($branch) { $line += " | git branch: $branch"; }
 
     return $line;
 }
