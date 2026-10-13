@@ -3,35 +3,27 @@ using namespace System.Collections.Generic;
 param(
     [string] $Entry = "",
     [string] $Pattern = "",
-    [int] $Last = 10
+    [int] $Last = 10,
+    [switch] $Compress
 );
 
 $ErrorActionPreference = 'Stop';
 $historyFile = "$env:AppData\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt";
-$historyContents = Get-Content -LiteralPath $historyFile -ErrorAction SilentlyContinue;
-$lineCount = [int] $historyContents.Length;
+$historyContents = @(Get-Content -LiteralPath $historyFile -ErrorAction SilentlyContinue);
 
-$entries = [HashSet[string]]::new();
-$entriesTotal = 0;
-
-for ($i = $lineCount - 1; $i -gt 0; $i--)
+if ($Entry -or $Pattern)
 {
-    $item = $historyContents[$i];
+    $matches = @($historyContents[-1..-$historyContents.Count] | Where-Object {
+        ($Entry -and $_.StartsWith($Entry)) -or ($Pattern -and $_ -like $Pattern)
+    });
 
-    if (($Entry -and $item.StartsWith($Entry)) -or ($Pattern -and $item -like $Pattern))
-    {
-        $entriesTotal++;
-
-        if ($entries.Count -le $Last)
-        {
-            $null = $entries.Add($item);
-        }
-    }
+    $matches | Select-Object -Unique | Select-Object -First $Last | Write-Host;
+    Write-Host "$($matches.Count) entries found.";
 }
 
-foreach ($entry in $entries)
+if ($Compress)
 {
-    Write-Host $entry;
+    $unique = $historyContents | Select-Object -Unique;
+    $unique | Out-File -LiteralPath $historyFile -Encoding utf8;
+    Write-Host "Compressed from $($historyContents.Count) to $($unique.Count) lines";
 }
-
-Write-Host "$entriesTotal entries found."
