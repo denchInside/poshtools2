@@ -8,7 +8,8 @@ param(
     [switch] $Think = $true,
     [switch] $AsDialogue,
     [switch] $Reset,
-    [switch] $ShowHistory
+    [switch] $ShowHistory,
+    [switch] $Raw
 )
 
 $ErrorActionPreference = 'Stop';
@@ -16,6 +17,7 @@ $WarningPreference = 'SilentlyContinue';
 
 Import-Module "$PSScriptRoot\modules\llm.psm1" -Scope Local;
 Import-Module "$PSScriptRoot\modules\ask.psm1" -Scope Local;
+Import-Module "$PSScriptRoot\modules\md.psm1" -Scope Local;
 
 $DefaultSystemPrompt = @'
 You are a command-line assistant running inside the user's PowerShell 7 session. You help with shell tasks, scripting, files, system questions, and troubleshooting on the user's own machine. You can also answer general questions briefly.
@@ -63,8 +65,8 @@ WHEN UNSURE
 - If you do not know something or cannot verify it, say so. You cannot see the user's screen, cannot run anything without approval, and can only reach the internet through commands or through search when it is enabled.
 
 TONE AND OUTPUT FORMAT
-Your reply is printed as plain text in a terminal.
-- No markdown: no headings, bold, tables, or code fences. Indent commands and code by four spaces.
+Your reply is rendered as markdown in a terminal.
+- Use markdown: short headings only when they help, **bold** for key terms, - or 1. lists for items, ```lang fenced code blocks with a language tag for commands and code, [text](url) links, and | tables | when tabular.
 - Lead with the answer or result, then only the detail that helps. Be direct and brief.
 - If you changed anything, say what you ran and what changed.
 - After tool calls, report the actual result. If the user asked to find, list, or show something, the reply must contain the items themselves (names, paths, or lines), not only a count. If there are too many to show in full, show as many as are useful (for example the first 50) and say how many were left out. For counts, sizes, or status checks with no items to enumerate, a short summary is enough.
@@ -518,7 +520,11 @@ if ($AsDialogue)
 {
     Write-Output $dialogue.History;
 }
-else
+elseif ($Raw)
 {
     Write-Output $response;
+}
+else
+{
+    Write-Output ($response | ConvertTo-MD_Ansi);
 }
