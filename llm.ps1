@@ -420,9 +420,10 @@ function Invoke-LLM_ToolLoop($Dialogue)
     return $content;
 }
 
+$LLM_CredentialsFile = "$PSScriptRoot\.data\llm.json";
 if (-not $global:__llm_Data)
 {
-    $credentials = Get-LLM_Credentials -FileName "$PSScriptRoot\.data\llm.json" -SelectModel:$Model;
+    $credentials = Get-LLM_Credentials -FileName $LLM_CredentialsFile -SelectModel:$Model;
     $dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $($SystemPrompt ? $SystemPrompt : $DefaultSystemPrompt);
     $dialogue.SetTools(@($PowerShellTool));
     $global:__llm_Data = [pscustomobject]@{
@@ -434,7 +435,15 @@ if (-not $global:__llm_Data)
 }
 elseif ($Model)
 {
-    $global:__llm_Data.Dialogue.Credentials = Get-LLM_Credentials -FileName "$PSScriptRoot\.data\llm.json" -SelectModel;
+    $fresh = Get-LLM_Credentials -FileName $LLM_CredentialsFile -SelectModel;
+    $null = Sync-LLM_DialogueCredentials -Dialogue $global:__llm_Data.Dialogue -Credentials $fresh;
+}
+else
+{
+    # Pick up externally reset credentials (llm-auth -Reset rewrites the file
+    # but the cached dialogue would otherwise keep the stale values).
+    # Silent: never prompts, never writes, keeps history intact.
+    $null = Sync-LLM_DialogueCredentialsFromFile -Dialogue $global:__llm_Data.Dialogue -FileName $LLM_CredentialsFile;
 }
 
 $data = $global:__llm_Data;

@@ -383,6 +383,122 @@ function Get-LLM_Credentials(
     return $credentials;
 }
 
+function Test-LLM_CredentialsEqual(
+    $Left,
+    $Right
+)
+{
+    <#
+    .SYNOPSIS
+        Compares two credential objects by value.
+    .PARAMETER Left
+        First credentials object (LLM_Credentials or any object with
+        HostName/Secret/Model properties).
+    .PARAMETER Right
+        Second credentials object.
+    #>
+
+    if ($null -eq $Left -or $null -eq $Right)
+    {
+        return $false;
+    }
+
+    return ($Left.HostName -eq $Right.HostName) `
+        -and ($Left.Secret -ceq $Right.Secret) `
+        -and ($Left.Model -ceq $Right.Model);
+}
+
+function Sync-LLM_DialogueCredentials(
+    $Dialogue,
+    $Credentials
+)
+{
+    <#
+    .SYNOPSIS
+        Refreshes a live dialogue's credentials without dropping history.
+    .PARAMETER Dialogue
+        The LLM_Dialogue whose Credentials should be updated.
+    .PARAMETER Credentials
+        The new credentials. Properties are copied one by one so this also
+        works when the credentials object comes from a different import of
+        this module (e.g. llm-auth.ps1 pushing to llm.ps1's dialogue), where
+        the class identities do not match and whole-object assignment fails.
+    .OUTPUTS
+        $true when credentials were updated, $false when already in sync.
+    #>
+
+    if ($null -eq $Dialogue -or $null -eq $Credentials)
+    {
+        return $false;
+    }
+
+    if ($null -eq $Dialogue.Credentials)
+    {
+        $Dialogue.Credentials = $Credentials;
+        return $true;
+    }
+
+    if (Test-LLM_CredentialsEqual -Left $Dialogue.Credentials -Right $Credentials)
+    {
+        return $false;
+    }
+
+    $Dialogue.Credentials.HostName = $Credentials.HostName;
+    $Dialogue.Credentials.Secret = $Credentials.Secret;
+    $Dialogue.Credentials.Model = $Credentials.Model;
+
+    return $true;
+}
+
+function Sync-LLM_DialogueCredentialsFromFile(
+    $Dialogue,
+    [string] $FileName
+)
+{
+    <#
+    .SYNOPSIS
+        Re-reads the credentials file and applies it to a live dialogue.
+    .DESCRIPTION
+        Silent pull path for scripts that cache a dialogue across invocations
+        (llm.ps1 keeps one in $global:__llm_Data). Unlike Get-LLM_Credentials
+        this never prompts and never writes: a missing, unreadable or
+        incomplete file simply leaves the dialogue untouched and returns
+        $false, so normal calls stay non-interactive.
+    .PARAMETER Dialogue
+        The LLM_Dialogue to refresh.
+    .PARAMETER FileName
+        Path to the JSON credentials file.
+    .OUTPUTS
+        $true when credentials were updated, $false otherwise.
+    #>
+
+    if ($null -eq $Dialogue -or -not $FileName)
+    {
+        return $false;
+    }
+
+    try
+    {
+        if (-not [File]::Exists($FileName))
+        {
+            return $false;
+        }
+
+        $save = Get-Content -LiteralPath $FileName -Raw -Encoding utf8 | ConvertFrom-Json;
+    }
+    catch
+    {
+        return $false;
+    }
+
+    if (-not $save.HostName -or -not $save.Secret -or -not $save.Model)
+    {
+        return $false;
+    }
+
+    return Sync-LLM_DialogueCredentials -Dialogue $Dialogue -Credentials $save;
+}
+
 function Get-LLM_WorkspaceState()
 {
     <#
@@ -404,4 +520,4 @@ function Get-LLM_WorkspaceState()
     return $line;
 }
 
-Export-ModuleMember -Function New-LLM_Dialogue, Get-LLM_Credentials, Get-LLM_WorkspaceState;
+Export-ModuleMember -Function New-LLM_Dialogue, Get-LLM_Credentials, Get-LLM_WorkspaceState, Test-LLM_CredentialsEqual, Sync-LLM_DialogueCredentials, Sync-LLM_DialogueCredentialsFromFile;
