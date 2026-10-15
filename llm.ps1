@@ -43,7 +43,7 @@ HOW TO WORK
 
 TOOL: powershell
 Runs one PowerShell 7 command on the user's machine and returns its combined output, warnings, and errors as text.
-- Read-only commands (listing, reading, searching, status checks) run immediately without asking the user to approve. Anything else is shown to the user first, who may deny it or edit it before it runs; if they edit it, the result says so and shows the command that actually ran. Keep commands short, readable, and single-purpose.
+- Read-only commands (listing, reading, searching, status checks) run immediately without asking the user to approve. Anything else is shown to the user first, who may approve or deny it. Keep commands short, readable, and single-purpose.
 - Nothing is interactive. Never use commands that wait for input (Read-Host, pause, confirmation prompts, pagers, editors).
 - Each call is independent. Variables do not carry over between calls; a changed working directory does. Use explicit paths.
 - The workspace summary states the operating system and PowerShell version. Write commands that fit them.
@@ -261,12 +261,16 @@ function Invoke-LLM_Capture([scriptblock] $Block)
 
 function Invoke-LLM_PowerShellTool([string] $Command)
 {
-    $wasEdited = $false;
-
     if (Test-LLM_IsReadOnlyCommand -Command $Command)
     {
         Write-Host '';
         Write-Host 'RUNNING (read-only, auto-approved):' -ForegroundColor DarkGray;
+        Write-Host $Command -ForegroundColor White;
+    }
+    elseif ($script:LLM_AutoApprove)
+    {
+        Write-Host '';
+        Write-Host 'RUNNING (auto-approved):' -ForegroundColor DarkGray;
         Write-Host $Command -ForegroundColor White;
     }
     else
@@ -275,23 +279,17 @@ function Invoke-LLM_PowerShellTool([string] $Command)
         Write-Host 'MODEL WANTS TO RUN:' -ForegroundColor Cyan;
         Write-Host $Command -ForegroundColor White;
 
-        $decision = Read-UserChoice -Question 'Approve?' -Format 'y/n/E' -Equals '';
+        $decision = Read-UserChoice -Question 'Approve? (a = auto-approve rest of turn)' -Format 'Y/n/a' -Equals '';
 
         switch ($decision)
         {
             'y'
             {
             }
-            'e'
+            'a'
             {
-                $edited = Read-Host 'Edit command';
-                if ($edited)
-                {
-                    $Command = $edited;
-                    $wasEdited = $true;
-                }
-                Write-Host 'RUNNING:' -ForegroundColor Cyan;
-                Write-Host $Command -ForegroundColor White;
+                $script:LLM_AutoApprove = $true;
+                Write-Host 'Auto-approval enabled for this turn.' -ForegroundColor Yellow;
             }
             default
             {
@@ -310,11 +308,6 @@ function Invoke-LLM_PowerShellTool([string] $Command)
     {
         $reason = $_.Exception.InnerException ? $_.Exception.InnerException.Message : "$_";
         $output = "The command could not be parsed: $reason";
-    }
-
-    if ($wasEdited)
-    {
-        return "The user edited your command before running it. Command that ran:`n$Command`n`nOutput:`n$output";
     }
 
     return $output;
@@ -351,6 +344,7 @@ function Invoke-LLM_ToolCall($Call)
 
 function Invoke-LLM_ToolLoop($Dialogue)
 {
+    $script:LLM_AutoApprove = $false;
     $content = $null;
     $consecutiveDenials = 0;
     $maxConsecutiveDenials = 2;
