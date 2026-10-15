@@ -1,209 +1,361 @@
 #Requires -Version 7.0
 
+Set-StrictMode -Version Latest;
 $ErrorActionPreference = 'Stop';
 $WarningPreference = 'SilentlyContinue';
 
-function Get-Input_ConsoleWidth
+class InputEditor
 {
-    $width = 0;
+    [string] $Text = '';
+    [int] $Pos = 0;
+    [int] $Goal = -1;
+    [int] $View = 0;
+    [int] $CursorRow = 0;
 
-    try { $width = [Console]::BufferWidth; } catch { $width = 0; }
+    [string] $Prefix;
+    [int] $Origin;
+    [int] $Indent;
+    [int] $Width;
+    [int] $Height;
+    [bool] $Mask;
 
-    if ($width -le 0)
+    InputEditor([string] $promptText, [int] $startCol, [int] $termWidth, [int] $termHeight, [bool] $hideText)
     {
-        try { $width = [Console]::WindowWidth; } catch { $width = 0; }
+        $this.Prefix = $promptText;
+        $this.Origin = $startCol;
+        $this.Indent = $startCol + $promptText.Length;
+        $this.Width = $termWidth;
+        $this.Height = $termHeight;
+        $this.Mask = $hideText;
     }
 
-    if ($width -le 0) { $width = 80; }
+    # Visual rows: every logical line is wrapped at Width-1 columns. The last column is never
+    # written, so the terminal never auto-wraps and the cursor always has a cell at line end.
+    # Rendering, cursor placement and Up/Down all derive from this single layout.
+    [object[]] Rows()
+    {
+        $rows = [System.Collections.Generic.List[object]]::new();
+        $lineStart = 0;
 
-    return [Math]::Max(20, $width);
+        while ($true)
+        {
+            $eol = $this.Text.IndexOf([char] "`n", $lineStart);
+            $lineEnd = ($eol -lt 0) ? $this.Text.Length : $eol;
+            $rowIndent = ($rows.Count -eq 0) ? $this.Indent : 0;
+            $start = $lineStart;
+
+            do
+            {
+                $end = [Math]::Min($lineEnd, $start + [Math]::Max(1, $this.Width - 1 - $rowIndent));
+                $rows.Add([pscustomobject] @{ Start = $start; End = $end; Indent = $rowIndent; Last = ($end -eq $lineEnd) });
+                $start = $end;
+                $rowIndent = 0;
+            } while ($start -lt $lineEnd);
+
+            if ($eol -lt 0) { break; }
+
+            $lineStart = $eol + 1;
+        }
+
+        return $rows.ToArray();
+    }
+
+    # Index of the visual row containing $pos. Rows are ordered by Start, so take the last one that starts at or before $pos.
+    [int] RowIndex([object[]] $rows, [int] $at)
+    {
+        $index = 0;
+
+        while ($index + 1 -lt $rows.Count -and $rows[$index + 1].Start -le $at) { $index++; }
+
+        return $index;
+    }
+
+    # Last cursor position inside a row. A wrap point belongs to the start of the next row, so a non-final row ends one column earlier.
+    [int] RowLast([object] $row)
+    {
+        return ($row.Last ? $row.End : ($row.End - 1));
+    }
+
+    [void] Seek([int] $index)
+    {
+        $this.Pos = [Math]::Clamp($index, 0, $this.Text.Length);
+        $this.Goal = -1;
+    }
+
+    [void] Insert([string] $insertion)
+    {
+        $this.Text = $this.Text.Insert($this.Pos, $insertion);
+        $this.Seek($this.Pos + $insertion.Length);
+    }
+
+    [void] Delete([int] $from, [int] $to)
+    {
+        $from = [Math]::Clamp($from, 0, $this.Text.Length);
+        $to = [Math]::Clamp($to, $from, $this.Text.Length);
+
+        if ($to -eq $from) { return; }
+
+        $this.Text = $this.Text.Remove($from, $to - $from);
+        $this.Seek($from);
+    }
+
+    [int] LineStart()
+    {
+        return ($this.Pos -eq 0) ? 0 : ($this.Text.LastIndexOf([char] "`n", $this.Pos - 1) + 1);
+    }
+
+    [int] LineEnd()
+    {
+        $eol = $this.Text.IndexOf([char] "`n", $this.Pos);
+        return ($eol -lt 0) ? $this.Text.Length : $eol;
+    }
+
+    [int] WordLeft()
+    {
+        $i = $this.Pos;
+
+        while ($i -gt 0 -and [char]::IsWhiteSpace($this.Text[$i - 1])) { $i--; }
+        while ($i -gt 0 -and -not [char]::IsWhiteSpace($this.Text[$i - 1])) { $i--; }
+
+        return $i;
+    }
+
+    [int] WordRight()
+    {
+        $i = $this.Pos;
+        $n = $this.Text.Length;
+
+        while ($i -lt $n -and [char]::IsWhiteSpace($this.Text[$i])) { $i++; }
+        while ($i -lt $n -and -not [char]::IsWhiteSpace($this.Text[$i])) { $i++; }
+
+        return $i;
+    }
+
+    # Kills to the end of the logical line; at the end of a line it joins with the next one.
+    [void] KillToLineEnd()
+    {
+        $end = $this.LineEnd();
+
+        if ($end -eq $this.Pos) { $end = [Math]::Min($this.Text.Length, $end + 1); }
+
+        $this.Delete($this.Pos, $end);
+    }
+
+    # Moves to the adjacent visual row, keeping the screen column the cursor started from.
+    [void] MoveVertical([int] $delta)
+    {
+        $rows = $this.Rows();
+        $from = $this.RowIndex($rows, $this.Pos);
+        $to = $from + $delta;
+
+        if ($to -lt 0 -or $to -ge $rows.Count) { return; }
+
+        $current = $rows[$from];
+
+        if ($this.Goal -lt 0) { $this.Goal = $current.Indent + $this.Pos - $current.Start; }
+
+        $target = $rows[$to];
+        $offset = [Math]::Clamp($this.Goal - $target.Indent, 0, $this.RowLast($target) - $target.Start);
+
+        $this.Pos = $target.Start + $offset;
+    }
+
+    [int] VisualStart()
+    {
+        $rows = $this.Rows();
+
+        return $rows[$this.RowIndex($rows, $this.Pos)].Start;
+    }
+
+    [int] VisualEnd()
+    {
+        $rows = $this.Rows();
+
+        return $this.RowLast($rows[$this.RowIndex($rows, $this.Pos)]);
+    }
+
+    # Keeps the cursor row inside the window of Height visible rows.
+    [void] Scroll([int] $count, [int] $cursor)
+    {
+        $this.View = [Math]::Max(0, [Math]::Min($this.View, $count - $this.Height));
+
+        if ($cursor -lt $this.View) { $this.View = $cursor; }
+        elseif ($cursor -ge $this.View + $this.Height) { $this.View = $cursor - $this.Height + 1; }
+    }
+
+    # Redraws the visible window of rows. Everything is positioned relative to the cursor
+    # left at the end of the previous frame, so the frame is correct regardless of scrolling.
+    [void] Render()
+    {
+        $rows = $this.Rows();
+        $cursor = $this.RowIndex($rows, $this.Pos);
+        $this.Scroll($rows.Count, $cursor);
+
+        # Once the view has scrolled past the prompt line, that line belongs to the input. The text
+        # before the prompt is gone, so the input starts at column 0 from now on.
+        if ($this.View -gt 0 -and $this.Origin -gt 0)
+        {
+            $this.Origin = 0;
+            $this.Indent = $this.Prefix.Length;
+            $rows = $this.Rows();
+            $cursor = $this.RowIndex($rows, $this.Pos);
+            $this.Scroll($rows.Count, $cursor);
+        }
+
+        $column = $rows[$cursor].Indent + $this.Pos - $rows[$cursor].Start;
+        $first = $this.View;
+        $last = [Math]::Min($rows.Count, $first + $this.Height) - 1;
+
+        $frame = [System.Text.StringBuilder]::new();
+
+        if ($this.CursorRow -gt 0) { [void] $frame.Append("`e[$($this.CursorRow)A"); }
+
+        $startCol = ($first -eq 0) ? $this.Origin : 0;
+        [void] $frame.Append("`e[$($startCol + 1)G`e[0J`e[?25l");
+
+        for ($i = $first; $i -le $last; $i++)
+        {
+            if ($i -gt $first) { [void] $frame.Append("`r`n"); }
+            if ($i -eq 0) { [void] $frame.Append($this.Prefix); }
+
+            $row = $rows[$i];
+            $chunk = $this.Text.Substring($row.Start, $row.End - $row.Start);
+            $visible = $this.Mask ? ('*' * $chunk.Length) : $chunk;
+            [void] $frame.Append($visible);
+        }
+
+        $up = $last - $cursor;
+
+        if ($up -gt 0) { [void] $frame.Append("`e[$($up)A"); }
+
+        [void] $frame.Append("`e[$($column + 1)G`e[?25h");
+
+        $this.CursorRow = $cursor - $first;
+
+        [Console]::Write($frame.ToString());
+    }
 }
 
-function Get-Input_ClipboardText
+function Get-Input_ConsoleWidth
+{
+    try { return [Math]::Max(20, [Console]::WindowWidth); }
+    catch { return 80; }
+}
+
+function Get-Input_ConsoleHeight
+{
+    try { return [Math]::Max(1, [Console]::WindowHeight); }
+    catch { return 25; }
+}
+
+function Test-Input_Interactive
 {
     try
     {
-        $text = Get-Clipboard -Raw -ErrorAction Stop;
-
-        if ($null -ne $text) { return "$text"; }
+        return $Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected;
     }
-    catch { }
-
-    return '';
+    catch { return $false; }
 }
 
 function Format-Input_Clean([string] $Text)
 {
-    if (-not $Text) { return ''; }
+    $clean = $Text -replace "`r`n?", "`n";
+    $clean = $clean.Replace("`t", '    ');
+    $clean = [regex]::Replace($clean, '\x1B\[[0-?]*[ -/]*[@-~]', '');
 
-    $clean = $Text.Replace("`r`n", "`n").Replace("`r", "`n").Replace("`t", '    ');
-    $clean = [regex]::Replace($clean, "`e\[[0-9;]*[A-Za-z~]", '');
-
-    $builder = [System.Text.StringBuilder]::new($clean.Length);
-
-    foreach ($char in $clean.ToCharArray())
-    {
-        if ($char -eq [char] "`n" -or -not [char]::IsControl($char)) { [void] $builder.Append($char); }
-    }
-
-    return $builder.ToString();
+    return [regex]::Replace($clean, '[\x00-\x09\x0B-\x1F\x7F]', '');
 }
 
-function Add-Input_Text($State, [string] $Text)
+function Get-Input_Paste
 {
-    $clean = Format-Input_Clean $Text;
-
-    if ($clean.Length -eq 0) { return; }
-
-    [void] $State.Buffer.Insert($State.Cursor, $clean);
-    $State.Cursor += $clean.Length;
+    try { return Format-Input_Clean ([string] (Get-Clipboard -Raw -ErrorAction Stop)); }
+    catch { return ''; }
 }
 
-function Get-Input_Position($State, [int] $Index)
+function Invoke-Input_Key([InputEditor] $Editor, [ConsoleKeyInfo] $Key)
 {
-    $row = 0;
-    $col = $State.StartLeft;
-    $width = $State.Width;
-    $text = $State.Buffer.ToString();
-    $limit = [Math]::Max(0, [Math]::Min($Index, $text.Length));
+    $modifiers = $Key.Modifiers;
+    $ctrl = $modifiers.HasFlag([ConsoleModifiers]::Control) -and -not $modifiers.HasFlag([ConsoleModifiers]::Alt);
+    $shift = $modifiers.HasFlag([ConsoleModifiers]::Shift);
 
-    for ($i = 0; $i -lt $limit; $i++)
+    if ($ctrl)
     {
-        if ($text[$i] -eq [char] "`n") { $row++; $col = 0; continue; }
-
-        $col++;
-
-        if ($col -ge $width) { $row++; $col = 0; }
-    }
-
-    return @{ Row = $row; Col = $col };
-}
-
-function Get-Input_DiffStart([string] $Old, [string] $New)
-{
-    $limit = [Math]::Min($Old.Length, $New.Length);
-
-    for ($i = 0; $i -lt $limit; $i++)
-    {
-        if ($Old[$i] -ne $New[$i]) { return $i; }
-    }
-
-    return $limit;
-}
-
-function Show-Input_Buffer($State, [switch] $Mask)
-{
-    $text = $State.Buffer.ToString();
-    $shown = $text;
-
-    if ($Mask)
-    {
-        $masked = [System.Text.StringBuilder]::new($text.Length);
-
-        foreach ($char in $text.ToCharArray())
+        switch ($Key.Key)
         {
-            if ($char -eq [char] "`n") { [void] $masked.Append("`n"); }
-            else { [void] $masked.Append('*'); }
-        }
+            ([ConsoleKey]::A) { $Editor.Seek($Editor.LineStart()); return 'Continue'; }
+            ([ConsoleKey]::E) { $Editor.Seek($Editor.LineEnd()); return 'Continue'; }
+            ([ConsoleKey]::U) { $Editor.Delete($Editor.LineStart(), $Editor.Pos); return 'Continue'; }
+            ([ConsoleKey]::K) { $Editor.KillToLineEnd(); return 'Continue'; }
+            ([ConsoleKey]::W) { $Editor.Delete($Editor.WordLeft(), $Editor.Pos); return 'Continue'; }
+            ([ConsoleKey]::V) { $Editor.Insert((Get-Input_Paste)); return 'Continue'; }
+            ([ConsoleKey]::C) { return 'Cancel'; }
+            ([ConsoleKey]::D)
+            {
+                if ($Editor.Text.Length -eq 0) { return 'Cancel'; }
 
-        $shown = $masked.ToString();
+                $Editor.Delete($Editor.Pos, $Editor.Pos + 1);
+                return 'Continue';
+            }
+        }
     }
 
-    $cells = $text.Length;
-    $end = Get-Input_Position $State $cells;
-    $from = Get-Input_DiffStart $State.PrevText $text;
-
-    $visible = $true;
-
-    try { $visible = [Console]::CursorVisible; [Console]::CursorVisible = $false; } catch { }
-
-    $left = 0;
-    $top = 0;
-
-    try
+    switch ($Key.Key)
     {
-        $at = Get-Input_Position $State $from;
-
-        try { [Console]::SetCursorPosition([Math]::Min($at.Col, $State.Width - 1), $State.StartTop + $at.Row); }
-        catch
+        ([ConsoleKey]::Enter)
         {
-            try { $State.StartTop = [Math]::Max(0, [Console]::BufferHeight - 1 - $end.Row); } catch { }
+            if ($shift -or $ctrl -or [Console]::KeyAvailable)
+            {
+                $Editor.Insert("`n");
+                return 'Continue';
+            }
 
-            $at = Get-Input_Position $State $from;
-
-            try { [Console]::SetCursorPosition([Math]::Min($at.Col, $State.Width - 1), $State.StartTop + $at.Row); } catch { }
+            return 'Submit';
         }
-
-        [Console]::Write($shown.Substring($from));
-
-        $over = $State.PrevCells - $cells;
-
-        if ($over -gt 0) { [Console]::Write(' ' * $over); }
-
-        try
+        ([ConsoleKey]::Escape) { return 'Cancel'; }
+        ([ConsoleKey]::Tab) { $Editor.Insert('    '); }
+        ([ConsoleKey]::Backspace)
         {
-            $drift = ($State.StartTop + $end.Row) - [Console]::CursorTop;
-
-            if ($drift -ne 0) { $State.StartTop -= $drift; }
+            if ($ctrl) { $Editor.Delete($Editor.WordLeft(), $Editor.Pos); }
+            else { $Editor.Delete($Editor.Pos - 1, $Editor.Pos); }
         }
-        catch { }
-
-        $State.PrevCells = $cells;
-        $State.PrevText = $text;
-
-        $cur = Get-Input_Position $State $State.Cursor;
-        $left = [Math]::Min($cur.Col, $State.Width - 1);
-        $top = $State.StartTop + $cur.Row;
-
-        try { $height = [Console]::BufferHeight; } catch { $height = $top + 1; }
-
-        if ($top -ge $height) { $top = $height - 1; }
-        if ($top -lt 0) { $top = 0; }
+        ([ConsoleKey]::Delete)
+        {
+            if ($ctrl) { $Editor.KillToLineEnd(); }
+            else { $Editor.Delete($Editor.Pos, $Editor.Pos + 1); }
+        }
+        ([ConsoleKey]::LeftArrow)
+        {
+            if ($ctrl) { $Editor.Seek($Editor.WordLeft()); }
+            else { $Editor.Seek($Editor.Pos - 1); }
+        }
+        ([ConsoleKey]::RightArrow)
+        {
+            if ($ctrl) { $Editor.Seek($Editor.WordRight()); }
+            else { $Editor.Seek($Editor.Pos + 1); }
+        }
+        ([ConsoleKey]::UpArrow) { $Editor.MoveVertical(-1); }
+        ([ConsoleKey]::DownArrow) { $Editor.MoveVertical(1); }
+        ([ConsoleKey]::Home)
+        {
+            if ($ctrl) { $Editor.Seek(0); }
+            else { $Editor.Seek($Editor.VisualStart()); }
+        }
+        ([ConsoleKey]::End)
+        {
+            if ($ctrl) { $Editor.Seek($Editor.Text.Length); }
+            else { $Editor.Seek($Editor.VisualEnd()); }
+        }
+        ([ConsoleKey]::Insert)
+        {
+            if ($shift) { $Editor.Insert((Get-Input_Paste)); }
+        }
+        default
+        {
+            if (-not [char]::IsControl($Key.KeyChar)) { $Editor.Insert([string] $Key.KeyChar); }
+        }
     }
-    finally
-    {
-        try { [Console]::SetCursorPosition($left, $top); } catch { }
-        try { [Console]::CursorVisible = $visible; } catch { }
-    }
-}
 
-function Get-Input_WordStart([string] $Text, [int] $Index)
-{
-    $i = [Math]::Max(0, [Math]::Min($Index, $Text.Length));
-
-    while ($i -gt 0 -and ($Text[$i - 1] -eq ' ' -or $Text[$i - 1] -eq [char] "`n")) { $i--; }
-    while ($i -gt 0 -and $Text[$i - 1] -ne ' ' -and $Text[$i - 1] -ne [char] "`n") { $i--; }
-
-    return $i;
-}
-
-function Get-Input_WordEnd([string] $Text, [int] $Index)
-{
-    $i = [Math]::Max(0, [Math]::Min($Index, $Text.Length));
-
-    while ($i -lt $Text.Length -and ($Text[$i] -eq ' ' -or $Text[$i] -eq [char] "`n")) { $i++; }
-    while ($i -lt $Text.Length -and $Text[$i] -ne ' ' -and $Text[$i] -ne [char] "`n") { $i++; }
-
-    return $i;
-}
-
-function Get-Input_LineStart([string] $Text, [int] $Index)
-{
-    $i = [Math]::Max(0, [Math]::Min($Index, $Text.Length));
-
-    if ($i -le 0) { return 0; }
-
-    $found = $Text.LastIndexOf("`n", $i - 1);
-
-    return ($found -lt 0) ? 0 : ($found + 1);
-}
-
-function Get-Input_LineEnd([string] $Text, [int] $Index)
-{
-    $i = [Math]::Max(0, [Math]::Min($Index, $Text.Length));
-    $found = $Text.IndexOf("`n", $i);
-
-    return ($found -lt 0) ? $Text.Length : $found;
+    return 'Continue';
 }
 
 function Read-Input_Multiline(
@@ -215,217 +367,49 @@ function Read-Input_Multiline(
     .SYNOPSIS
         Reads one multiline input with safe paste handling.
     .DESCRIPTION
-        Enter submits, Shift+Enter (or Ctrl+Enter) inserts a newline, Esc cancels
-        and returns $null. Ctrl+V (or Shift+Insert) pastes the clipboard as text:
-        embedded newlines stay in the buffer and never submit. Pasted bursts that
-        arrive as keystrokes are detected through pending input and also stay in
-        the buffer. Falls back to Read-Host when the console is not interactive.
+        Enter submits. Shift+Enter or Ctrl+Enter inserts a newline, and so does Enter when more input is
+        already pending (a pasted block typed as keystrokes). Esc or Ctrl+C cancels and returns $null.
+        Ctrl+V and Shift+Insert paste the clipboard as text. Falls back to Read-Host when the console is
+        not interactive.
     #>
 
-    $interactive = $false;
-
-    try { $interactive = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected -and $Host.Name -eq 'ConsoleHost'; }
-    catch { $interactive = $false; }
-
-    if (-not $interactive)
+    if (-not (Test-Input_Interactive))
     {
-        $canMask = $false;
-
-        try { $canMask = -not [Console]::IsInputRedirected; } catch { $canMask = $false; }
-
-        if ($Mask -and $canMask)
-        {
-            try { return Read-Host $Prompt -MaskInput; } catch { }
-        }
-
-        return Read-Host $Prompt;
+        return Read-Host -Prompt $Prompt -MaskInput:($Mask -and -not [Console]::IsInputRedirected);
     }
+
+    $editor = [InputEditor]::new("${Prompt}: ", [Console]::CursorLeft, (Get-Input_ConsoleWidth), (Get-Input_ConsoleHeight), $Mask.IsPresent);
+    $action = 'Continue';
+    $treatCAsInput = [Console]::TreatControlCAsInput;
+
+    # Ctrl+C must arrive as a key. Otherwise .NET turns it into a signal, which a blocked ReadKey never handles.
+    [Console]::TreatControlCAsInput = $true;
 
     try
     {
-        [Console]::Write($Prompt + ': ');
+        $editor.Render();
 
-        $state = @{
-            Buffer = [System.Text.StringBuilder]::new();
-            Cursor = 0;
-            PrevCells = 0;
-            PrevText = '';
-            StartLeft = [Console]::CursorLeft;
-            StartTop = [Console]::CursorTop;
-            Width = Get-Input_ConsoleWidth;
-        };
-
-        $done = $false;
-        $cancelled = $false;
-
-        while (-not $done)
+        while ($action -eq 'Continue')
         {
-            $key = [Console]::ReadKey($true);
-            $control = ($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0;
-            $shift = ($key.Modifiers -band [ConsoleModifiers]::Shift) -ne 0;
-            $alt = ($key.Modifiers -band [ConsoleModifiers]::Alt) -ne 0;
-            $ctrlOnly = $control -and -not $alt;
-            $text = $state.Buffer.ToString();
-            $handled = $false;
+            $action = Invoke-Input_Key $editor ([Console]::ReadKey($true));
 
-            if ($ctrlOnly)
-            {
-                $handled = $true;
-
-                switch ($key.Key)
-                {
-                    ([ConsoleKey]::V) { Add-Input_Text $state (Get-Input_ClipboardText); }
-                    ([ConsoleKey]::C) { $cancelled = $true; $done = $true; }
-                    ([ConsoleKey]::D)
-                    {
-                        if ($state.Buffer.Length -eq 0) { $cancelled = $true; $done = $true; }
-                    }
-                    ([ConsoleKey]::A) { $state.Cursor = Get-Input_LineStart $text $state.Cursor; }
-                    ([ConsoleKey]::E) { $state.Cursor = Get-Input_LineEnd $text $state.Cursor; }
-                    ([ConsoleKey]::U)
-                    {
-                        $from = Get-Input_LineStart $text $state.Cursor;
-                        [void] $state.Buffer.Remove($from, $state.Cursor - $from);
-                        $state.Cursor = $from;
-                    }
-                    ([ConsoleKey]::K)
-                    {
-                        $to = Get-Input_LineEnd $text $state.Cursor;
-                        [void] $state.Buffer.Remove($state.Cursor, $to - $state.Cursor);
-                    }
-                    ([ConsoleKey]::W)
-                    {
-                        $from = Get-Input_WordStart $text $state.Cursor;
-                        [void] $state.Buffer.Remove($from, $state.Cursor - $from);
-                        $state.Cursor = $from;
-                    }
-                    default { $handled = $false; }
-                }
-            }
-
-            if (-not $handled)
-            {
-                switch ($key.Key)
-                {
-                    ([ConsoleKey]::Enter)
-                    {
-                        if ($shift -or $ctrlOnly) { Add-Input_Text $state "`n"; }
-                        elseif ([Console]::KeyAvailable) { Add-Input_Text $state "`n"; }
-                        else { $done = $true; }
-                    }
-                    ([ConsoleKey]::Escape) { $cancelled = $true; $done = $true; }
-                    ([ConsoleKey]::Tab)
-                    {
-                        if (-not $alt) { Add-Input_Text $state '    '; }
-                    }
-                    ([ConsoleKey]::Backspace)
-                    {
-                        if ($state.Cursor -le 0) { break; }
-
-                        if ($ctrlOnly)
-                        {
-                            $from = Get-Input_WordStart $text $state.Cursor;
-                            [void] $state.Buffer.Remove($from, $state.Cursor - $from);
-                            $state.Cursor = $from;
-                        }
-                        else
-                        {
-                            [void] $state.Buffer.Remove($state.Cursor - 1, 1);
-                            $state.Cursor--;
-                        }
-                    }
-                    ([ConsoleKey]::Delete)
-                    {
-                        if ($state.Cursor -ge $state.Buffer.Length) { break; }
-
-                        if ($ctrlOnly)
-                        {
-                            $to = Get-Input_LineEnd $text $state.Cursor;
-                            [void] $state.Buffer.Remove($state.Cursor, $to - $state.Cursor);
-                        }
-                        else
-                        {
-                            [void] $state.Buffer.Remove($state.Cursor, 1);
-                        }
-                    }
-                    ([ConsoleKey]::LeftArrow)
-                    {
-                        $state.Cursor = $ctrlOnly ? (Get-Input_WordStart $text $state.Cursor) : ([Math]::Max(0, $state.Cursor - 1));
-                    }
-                    ([ConsoleKey]::RightArrow)
-                    {
-                        $state.Cursor = $ctrlOnly ? (Get-Input_WordEnd $text $state.Cursor) : ([Math]::Min($state.Buffer.Length, $state.Cursor + 1));
-                    }
-                    ([ConsoleKey]::UpArrow)
-                    {
-                        $lineStart = Get-Input_LineStart $text $state.Cursor;
-
-                        if ($lineStart -gt 0)
-                        {
-                            $col = $state.Cursor - $lineStart;
-                            $prevEnd = $lineStart - 1;
-                            $prevStart = Get-Input_LineStart $text $prevEnd;
-                            $state.Cursor = [Math]::Min($prevStart + $col, $prevEnd);
-                        }
-                    }
-                    ([ConsoleKey]::DownArrow)
-                    {
-                        $lineStart = Get-Input_LineStart $text $state.Cursor;
-                        $lineEnd = Get-Input_LineEnd $text $state.Cursor;
-
-                        if ($lineEnd -lt $text.Length)
-                        {
-                            $col = $state.Cursor - $lineStart;
-                            $nextStart = $lineEnd + 1;
-                            $nextEnd = Get-Input_LineEnd $text $nextStart;
-                            $state.Cursor = [Math]::Min($nextStart + $col, $nextEnd);
-                        }
-                    }
-                    ([ConsoleKey]::Home)
-                    {
-                        $state.Cursor = $ctrlOnly ? 0 : (Get-Input_LineStart $text $state.Cursor);
-                    }
-                    ([ConsoleKey]::End)
-                    {
-                        $state.Cursor = $ctrlOnly ? $state.Buffer.Length : (Get-Input_LineEnd $text $state.Cursor);
-                    }
-                    ([ConsoleKey]::Insert)
-                    {
-                        if ($shift) { Add-Input_Text $state (Get-Input_ClipboardText); }
-                    }
-                    default
-                    {
-                        $char = $key.KeyChar;
-
-                        if ($char -and -not [char]::IsControl($char)) { Add-Input_Text $state ([string] $char); }
-                    }
-                }
-            }
-
-            if (-not $done) { Show-Input_Buffer $state -Mask:$Mask; }
+            if ($action -eq 'Continue') { $editor.Render(); }
         }
-
-        if ($cancelled)
-        {
-            [void] $state.Buffer.Clear();
-            $state.Cursor = 0;
-            Show-Input_Buffer $state -Mask:$Mask;
-        }
-
-        $end = Get-Input_Position $state $state.Buffer.Length;
-
-        try { [Console]::SetCursorPosition([Math]::Min($end.Col, $state.Width - 1), $state.StartTop + $end.Row); } catch { }
-
-        [Console]::WriteLine();
-
-        if ($cancelled) { return $null; }
-
-        return $state.Buffer.ToString();
     }
-    catch
+    finally
     {
-        return Read-Host $Prompt;
+        [Console]::TreatControlCAsInput = $treatCAsInput;
     }
+
+    if ($action -eq 'Cancel') { $editor.Text = ''; }
+
+    $editor.Seek($editor.Text.Length);
+    $editor.Render();
+    [Console]::WriteLine();
+
+    if ($action -eq 'Cancel') { return $null; }
+
+    return $editor.Text;
 }
 
 Export-ModuleMember -Function Read-Input_Multiline;
