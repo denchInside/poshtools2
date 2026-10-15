@@ -18,6 +18,7 @@ $WarningPreference = 'SilentlyContinue';
 Import-Module "$PSScriptRoot\modules\llm.psm1" -Scope Local;
 Import-Module "$PSScriptRoot\modules\ask.psm1" -Scope Local;
 Import-Module "$PSScriptRoot\modules\md.psm1" -Scope Local;
+Import-Module "$PSScriptRoot\modules\input.psm1" -Scope Local;
 
 $DefaultSystemPrompt = @'
 You are a command-line assistant running inside the user's PowerShell 7 session. You help with shell tasks, scripting, files, system questions, and troubleshooting on the user's own machine. You can also answer general questions briefly.
@@ -293,7 +294,7 @@ function Invoke-LLM_PowerShellTool([string] $Command)
             }
             default
             {
-                $feedback = Read-Host 'Denied. Tell it why (optional)';
+                $feedback = Read-Input_Multiline -Prompt 'Denied. Tell it why (optional)';
                 if (-not $feedback) { $feedback = 'Stop executing commands immediately'; }
                 return "User denied execution. LISTEN TO THE USER: $feedback";
             }
@@ -474,12 +475,12 @@ $dialogue.Compact({
 
 if (-not $Prompt)
 {
-    $Prompt = Read-Host 'Prompt';
+    $Prompt = Read-Input_Multiline -Prompt 'Prompt';
     if (-not $Prompt) { exit; }
 }
 elseif ($Prompt -is [scriptblock])
 {
-    $realPrompt = Read-Host 'Prompt';
+    $realPrompt = Read-Input_Multiline -Prompt 'Prompt';
     $output = Invoke-LLM_Capture -Block $Prompt;
     $output = "Code provided by user:`n$Prompt`n`nCode output:`n$output";
     $Prompt = $realPrompt ? "User question:`n$realPrompt`n`n$output" : $output;

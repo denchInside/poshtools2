@@ -7,6 +7,8 @@ using namespace System.Runtime.InteropServices
 $ErrorActionPreference = 'Stop';
 $WarningPreference = 'SilentlyContinue';
 
+Import-Module "$PSScriptRoot\input.psm1" -Scope Local;
+
 class LLM_Credentials
 {
     [string] $HostName;
@@ -270,7 +272,7 @@ function Read-LLM_Value(
 {
     $shown = $Mask ? '****' : $Default;
     $label = $Default ? "$Prompt [$shown]" : $Prompt;
-    $value = $Mask ? (Read-Host $label -MaskInput) : (Read-Host $label);
+    $value = Read-Input_Multiline -Prompt $label -Mask:$Mask;
 
     return $value ? $value : $Default;
 }
@@ -350,7 +352,7 @@ function Get-LLM_Credentials(
         $save.HostName
     }
 
-    if (-not $credentials.HostName) { $credentials.HostName = Read-Host 'host'; }
+    if (-not $credentials.HostName) { $credentials.HostName = Read-Input_Multiline -Prompt 'host'; }
     if (-not $credentials.HostName) { throw [System.ArgumentException]::new('cannot use empty host', 'HostName'); }
 
     $credentials.Secret = if ($Reset) {
