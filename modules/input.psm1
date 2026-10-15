@@ -79,6 +79,18 @@ function Get-Input_Position($State, [int] $Index)
     return @{ Row = $row; Col = $col };
 }
 
+function Get-Input_DiffStart([string] $Old, [string] $New)
+{
+    $limit = [Math]::Min($Old.Length, $New.Length);
+
+    for ($i = 0; $i -lt $limit; $i++)
+    {
+        if ($Old[$i] -ne $New[$i]) { return $i; }
+    }
+
+    return $limit;
+}
+
 function Show-Input_Buffer($State, [switch] $Mask)
 {
     $text = $State.Buffer.ToString();
@@ -99,40 +111,60 @@ function Show-Input_Buffer($State, [switch] $Mask)
 
     $cells = $text.Length;
     $end = Get-Input_Position $State $cells;
+    $from = Get-Input_DiffStart $State.PrevText $text;
 
-    try { [Console]::SetCursorPosition($State.StartLeft, $State.StartTop); }
-    catch
-    {
-        try { $State.StartTop = [Math]::Max(0, [Console]::BufferHeight - 1 - $end.Row); } catch { }
-        try { [Console]::SetCursorPosition($State.StartLeft, $State.StartTop); } catch { }
-    }
+    $visible = $true;
 
-    [Console]::Write($shown);
+    try { $visible = [Console]::CursorVisible; [Console]::CursorVisible = $false; } catch { }
 
-    $over = $State.PrevCells - $cells;
-
-    if ($over -gt 0) { [Console]::Write(' ' * $over); }
+    $left = 0;
+    $top = 0;
 
     try
     {
-        $drift = ($State.StartTop + $end.Row) - [Console]::CursorTop;
+        $at = Get-Input_Position $State $from;
 
-        if ($drift -ne 0) { $State.StartTop -= $drift; }
+        try { [Console]::SetCursorPosition([Math]::Min($at.Col, $State.Width - 1), $State.StartTop + $at.Row); }
+        catch
+        {
+            try { $State.StartTop = [Math]::Max(0, [Console]::BufferHeight - 1 - $end.Row); } catch { }
+
+            $at = Get-Input_Position $State $from;
+
+            try { [Console]::SetCursorPosition([Math]::Min($at.Col, $State.Width - 1), $State.StartTop + $at.Row); } catch { }
+        }
+
+        [Console]::Write($shown.Substring($from));
+
+        $over = $State.PrevCells - $cells;
+
+        if ($over -gt 0) { [Console]::Write(' ' * $over); }
+
+        try
+        {
+            $drift = ($State.StartTop + $end.Row) - [Console]::CursorTop;
+
+            if ($drift -ne 0) { $State.StartTop -= $drift; }
+        }
+        catch { }
+
+        $State.PrevCells = $cells;
+        $State.PrevText = $text;
+
+        $cur = Get-Input_Position $State $State.Cursor;
+        $left = [Math]::Min($cur.Col, $State.Width - 1);
+        $top = $State.StartTop + $cur.Row;
+
+        try { $height = [Console]::BufferHeight; } catch { $height = $top + 1; }
+
+        if ($top -ge $height) { $top = $height - 1; }
+        if ($top -lt 0) { $top = 0; }
     }
-    catch { }
-
-    $State.PrevCells = $cells;
-
-    $at = Get-Input_Position $State $State.Cursor;
-    $left = [Math]::Min($at.Col, $State.Width - 1);
-    $top = $State.StartTop + $at.Row;
-
-    try { $height = [Console]::BufferHeight; } catch { $height = $top + 1; }
-
-    if ($top -ge $height) { $top = $height - 1; }
-    if ($top -lt 0) { $top = 0; }
-
-    try { [Console]::SetCursorPosition($left, $top); } catch { }
+    finally
+    {
+        try { [Console]::SetCursorPosition($left, $top); } catch { }
+        try { [Console]::CursorVisible = $visible; } catch { }
+    }
 }
 
 function Get-Input_WordStart([string] $Text, [int] $Index)
@@ -217,6 +249,7 @@ function Read-Input_Multiline(
             Buffer = [System.Text.StringBuilder]::new();
             Cursor = 0;
             PrevCells = 0;
+            PrevText = '';
             StartLeft = [Console]::CursorLeft;
             StartTop = [Console]::CursorTop;
             Width = Get-Input_ConsoleWidth;
