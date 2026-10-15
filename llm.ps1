@@ -259,25 +259,25 @@ function Invoke-LLM_Capture([scriptblock] $Block)
     return $text;
 }
 
+function Write-LLM_Status([string] $Markdown)
+{
+    if ($script:Raw) { Write-Host $Markdown; return; }
+    Write-MD_Markdown -Markdown $Markdown;
+}
+
 function Invoke-LLM_PowerShellTool([string] $Command)
 {
     if (Test-LLM_IsReadOnlyCommand -Command $Command)
     {
-        Write-Host '';
-        Write-Host 'RUNNING (read-only, auto-approved):' -ForegroundColor DarkGray;
-        Write-Host $Command -ForegroundColor White;
+        Write-LLM_Status ((@('**RUNNING (read-only, auto-approved):**', '', '```powershell', $Command, '```') -join "`n"));
     }
     elseif ($script:LLM_AutoApprove)
     {
-        Write-Host '';
-        Write-Host 'RUNNING (auto-approved):' -ForegroundColor DarkGray;
-        Write-Host $Command -ForegroundColor White;
+        Write-LLM_Status ((@('**RUNNING (auto-approved):**', '', '```powershell', $Command, '```') -join "`n"));
     }
     else
     {
-        Write-Host '';
-        Write-Host 'MODEL WANTS TO RUN:' -ForegroundColor Cyan;
-        Write-Host $Command -ForegroundColor White;
+        Write-LLM_Status ((@('**MODEL WANTS TO RUN:**', '', '```powershell', $Command, '```') -join "`n"));
 
         $decision = Read-UserChoice -Question 'Approve? (a = auto-approve rest of turn)' -Format 'Y/n/a' -Equals '';
 
@@ -289,7 +289,7 @@ function Invoke-LLM_PowerShellTool([string] $Command)
             'a'
             {
                 $script:LLM_AutoApprove = $true;
-                Write-Host 'Auto-approval enabled for this turn.' -ForegroundColor Yellow;
+                Write-LLM_Status '> [!NOTE] Auto-approval enabled for this turn.';
             }
             default
             {
@@ -387,8 +387,7 @@ function Invoke-LLM_ToolLoop($Dialogue)
 
         if ($consecutiveDenials -ge $maxConsecutiveDenials)
         {
-            Write-Host '';
-            Write-Host "You've denied $consecutiveDenials commands in a row." -ForegroundColor Yellow;
+            Write-LLM_Status ("> [!WARNING] You've denied $consecutiveDenials commands in a row.");
             $shouldStop = Read-UserChoice -Question 'Stop here and let you drive?' -Format 'Y/n';
 
             if ($shouldStop)
@@ -402,8 +401,7 @@ function Invoke-LLM_ToolLoop($Dialogue)
 
         if ($totalCalls -ge $maxTotalCalls)
         {
-            Write-Host '';
-            Write-Host "Stopping after $totalCalls tool calls in one turn, that's too many for one question." -ForegroundColor Yellow;
+            Write-LLM_Status ("> [!WARNING] Stopping after $totalCalls tool calls in one turn, that's too many for one question.");
             $stoppedEarly = $true;
             break;
         }
@@ -454,7 +452,7 @@ if ($Reset -or $ShowHistory)
     {
         $dialogue.Clear();
         $data.LastLocation = $null;
-        Write-Host 'Context cleared successfully.' -ForegroundColor Green;
+        Write-LLM_Status '> [!NOTE] Context cleared successfully.';
     }
     exit;
 }
