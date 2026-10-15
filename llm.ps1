@@ -29,6 +29,8 @@ TOOL RULES. A rule binds every turn. Break one only when no listed tool can do t
 - Search contents with grep. DON'T run Select-String. DO call grep, then read one targeted window.
 - Read files with read_file. DON'T run Get-Content. DO read once with offset and limit.
 - Change files with edit_file. DON'T run Set-Content or rewrite a whole file for a small change. DO replace the exact line range.
+- Read before you change: call read_file in the same turn before edit_file or write_file. DON'T edit from grep output or memory. DO read first; unread or stale writes get rejected.
+- Change one file once per block of calls. DON'T stack two edits to one file in a single response. DO finish one edit, use its fresh numbers, then continue.
 - Create files with write_file. DON'T use write_file on an existing file for a small change. DO use write_file for new files and full rewrites.
 - Run everything else with powershell. DON'T use interactive commands (Read-Host, confirmation prompts, pagers, editors). DO keep commands short, single-purpose, and explicit-pathed. Each call runs alone; variables do not carry over, the working directory does.
 
@@ -84,6 +86,7 @@ Replaces lines [start, end) of the file at path with text. Numbers are 1-based: 
 - Requires approval and shows old versus new lines. The write is atomic.
 - DON'T guess line numbers from memory or a stale read. DO copy them from a fresh read_file result.
 - A failed edit changes nothing. DON'T retry the same range. DO re-read the file and rebuild the range.
+- Each result returns fresh numbered lines around the change; base the next edit on those numbers.
 
 DENIALS AND ERRORS
 - A tool result starting with "User denied execution" carries a reason after "LISTEN TO THE USER". Obey it. Never retry the same or an equivalent command.
@@ -504,6 +507,43 @@ function Get-LLM_DisplayPath([string] $FullPath)
     return $FullPath;
 }
 
+function Get-LLM_ByteHash([byte[]] $Bytes)
+{
+    $sha = [System.Security.Cryptography.SHA256]::Create();
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', ''); }
+    finally { $sha.Dispose(); }
+}
+
+function Get-LLM_BatchWritePath($Call)
+{
+    try
+    {
+        if ($Call.function.name -notin @('edit_file', 'write_file')) { return $null; }
+        $args = $Call.function.arguments | ConvertFrom-Json -ErrorAction Stop;
+        if ($null -eq $args.path -or "$($args.path)" -eq '') { return $null; }
+        return (Get-LLM_FullPath -Path "$($args.path)");
+    }
+    catch
+    {
+        return $null;
+    }
+}
+
+function Test-LLM_FreshRead([string] $Full, [string] $Display, [string] $CurrentHash, [int] $CurrentTotal)
+{
+    $seen = $script:LLM_ReadLedger[$Full];
+    if ($null -eq $seen)
+    {
+        return "No read_file record for $Display in this turn. Read it first with read_file, then retry.";
+    }
+    if ($seen.Hash -cne $CurrentHash)
+    {
+        return "File changed since your read of $Display (now $CurrentTotal lines). Re-read it with read_file, then retry with fresh line numbers.";
+    }
+
+    return $null;
+}
+
 function Limit-LLM_Text([string] $Text)
 {
     $limit = 20000;
@@ -783,6 +823,7 @@ function Invoke-LLM_ReadFileTool($Arguments)
 
         $content = @(Get-Content -LiteralPath $full -ErrorAction Stop);
         $total = $content.Count;
+        $script:LLM_ReadLedger[$full] = @{ Hash = Get-LLM_ByteHash -Bytes ([System.IO.File]::ReadAllBytes($full)); Total = $total };
         if ($total -eq 0) { return '(empty file)'; }
         if ($offset -gt $total) { return "offset $offset is beyond end of file ($total lines)"; }
 
@@ -818,6 +859,21 @@ function Invoke-LLM_WriteFileTool($Arguments)
     $content = "$($Arguments.content)";
     $full = Get-LLM_FullPath -Path $pathStr;
 
+    if (Test-Path -LiteralPath $full)
+    {
+        $probe = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue;
+        if ($probe -and -not $probe.PSIsContainer)
+        {
+            $curBytes = [System.IO.File]::ReadAllBytes($full);
+            $curText = [System.Text.Encoding]::UTF8.GetString($curBytes);
+            $parts = @($curText -split "`r?`n");
+            if ($curText.EndsWith("`n") -and $parts.Count -gt 0 -and $parts[-1] -eq '') { $parts = @($parts | Select-Object -SkipLast 1); }
+            if ($curText -eq '') { $parts = @(); }
+            $stale = Test-LLM_FreshRead -Full $full -Display $pathStr -CurrentHash (Get-LLM_ByteHash -Bytes $curBytes) -CurrentTotal $parts.Count;
+            if ($stale) { return $stale; }
+        }
+    }
+
     $split = @($content -split "`n");
     $lineCount = ($content -eq '') ? 0 : $split.Count;
     $byteCount = [System.Text.Encoding]::UTF8.GetByteCount($content);
@@ -837,6 +893,7 @@ function Invoke-LLM_WriteFileTool($Arguments)
         }
 
         [System.IO.File]::WriteAllText($full, $content, [System.Text.UTF8Encoding]::new($false));
+        $script:LLM_ReadLedger[$full] = @{ Hash = Get-LLM_ByteHash -Bytes ([System.Text.Encoding]::UTF8.GetBytes($content)); Total = $lineCount };
         return "wrote $lineCount lines ($byteCount bytes) to $pathStr";
     }
     catch
@@ -892,6 +949,8 @@ function Invoke-LLM_EditFileTool($Arguments)
         }
 
         $total = $fileLines.Count;
+        $stale = Test-LLM_FreshRead -Full $full -Display $pathStr -CurrentHash (Get-LLM_ByteHash -Bytes $rawBytes) -CurrentTotal $total;
+        if ($stale) { return $stale; }
         if ($start -gt ($total + 1))
         {
             return "Invalid range: start $start is beyond end of file ($total lines). Re-read file with read_file before retrying.";
@@ -954,7 +1013,21 @@ function Invoke-LLM_EditFileTool($Arguments)
         if ($trailing -and $out.Count -gt 0) { $newText += $eol; }
         [System.IO.File]::WriteAllText($full, $newText, [System.Text.UTF8Encoding]::new($hasBom));
 
-        return "edited ${pathStr}: $summary, $($out.Count) lines total";
+        $newBytes = [System.Text.Encoding]::UTF8.GetBytes($newText);
+        if ($hasBom) { $newBytes = [byte[]]([byte[]](0xEF, 0xBB, 0xBF) + $newBytes); }
+        $script:LLM_ReadLedger[$full] = @{ Hash = Get-LLM_ByteHash -Bytes $newBytes; Total = $out.Count };
+
+        $result = "edited ${pathStr}: $summary, $($out.Count) lines total";
+        if ($out.Count -gt 0)
+        {
+            $wFrom = [Math]::Max(1, $start - 5);
+            $wTo = [Math]::Min($out.Count, [Math]::Max($start, $end - 1) + 5);
+            $window = [System.Collections.Generic.List[string]]::new();
+            for ($n = $wFrom; $n -le $wTo; $n++) { $window.Add((Format-LLM_NumberedLine -Number $n -Text $out[$n - 1])); }
+            $result += "`n" + ($window -join "`n");
+        }
+
+        return $result;
     }
     catch
     {
@@ -1014,6 +1087,7 @@ function Invoke-LLM_ToolCall($Call)
 function Invoke-LLM_ToolLoop($Dialogue)
 {
     $script:LLM_AutoApprove = $script:Yolo ? $true : $false;
+    $script:LLM_ReadLedger = @{}
     $content = $null;
     $consecutiveDenials = 0;
     $maxConsecutiveDenials = 2;
@@ -1025,6 +1099,7 @@ function Invoke-LLM_ToolLoop($Dialogue)
     {
         $calls = @($Dialogue.PendingToolCalls);
         $answered = 0;
+        $batchWritten = @{};
 
         try
         {
@@ -1038,7 +1113,21 @@ function Invoke-LLM_ToolLoop($Dialogue)
                 }
 
                 $totalCalls++;
+                $writePath = Get-LLM_BatchWritePath -Call $call;
+                if ($writePath -and $batchWritten.ContainsKey($writePath))
+                {
+                    $display = Get-LLM_DisplayPath -FullPath $writePath;
+                    $Dialogue.SubmitToolResult($call.id, $call.function.name, "Skipped: $display was already changed earlier in this batch, so these line numbers are stale. Re-read it with read_file, then continue in the next turn.");
+                    $answered++;
+                    continue;
+                }
+
                 $output = Invoke-LLM_ToolCall -Call $call;
+
+                if ($writePath -and ($output.StartsWith('edited ') -or $output.StartsWith('wrote ')))
+                {
+                    $batchWritten[$writePath] = $true;
+                }
 
                 $consecutiveDenials = $output.StartsWith('User denied execution') ? ($consecutiveDenials + 1) : 0;
 
