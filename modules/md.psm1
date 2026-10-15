@@ -2577,11 +2577,17 @@ class MD_Renderer
     {
         $palTheme = $this.Theme;
         $language = $block.Info;
+        $lines = [List[string]]::new();
+
+        if ([string]::IsNullOrWhiteSpace($block.Text))
+        {
+            return $lines;
+        }
+
         $body = [MD_Highlighter]::Highlight($block.Text, $language, $palTheme);
         $gutter = [MD_Ansi]::Paint($palTheme.Get('code.border'), $palTheme.Glyph('gutter'));
         $label = ($language.Length -gt 0) ? ($palTheme.Color ? $language : "[$language]") : '';
         $widest = [MD_Text]::Width($label);
-        $lines = [List[string]]::new();
 
         foreach ($line in $body) { $widest = [Math]::Max($widest, [MD_Text]::Visible($line)); }
 
@@ -2589,7 +2595,7 @@ class MD_Renderer
         {
             if ($label.Length -gt 0) { $lines.Add($gutter + ' ' + $label); }
 
-            foreach ($line in $body) { $lines.Add($gutter + ' ' + $line); }
+            foreach ($line in $body) { $lines.Add(($line.Trim().Length -eq 0) ? '' : ($gutter + ' ' + $line)); }
 
             return $lines;
         }
@@ -2612,6 +2618,12 @@ class MD_Renderer
 
         foreach ($line in $body)
         {
+            if ($line.Trim().Length -eq 0)
+            {
+                $lines.Add('');
+                continue;
+            }
+
             $content = $line.Replace($reset, $reset + $background);
             $tail = [MD_Text]::Repeat(' ', $inner - [MD_Text]::Visible($line));
 
