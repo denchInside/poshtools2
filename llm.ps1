@@ -3,14 +3,14 @@
 param(
     $Prompt,
     [string] $SystemPrompt,
+    [string] $Session,
     [switch] $Model,
     [switch] $Search,
     [switch] $Quick,
-    [switch] $AsDialogue,
     [switch] $Reset,
-    [switch] $ShowHistory,
-    [switch] $Raw,
-    [switch] $Yolo
+    [switch] $Yolo,
+    [switch] $OneShot,
+    [switch] $NoTools
 )
 
 $ErrorActionPreference = 'Stop';
@@ -421,7 +421,7 @@ function Invoke-LLM_Capture([scriptblock] $Block)
 
 function Write-LLM_Status([string] $Markdown)
 {
-    if ($script:Raw) { Write-Host $Markdown; return; }
+    if ($script:OneShot) { Write-Host $Markdown; return; }
     Write-MD_Markdown -Markdown $Markdown;
 }
 
@@ -1117,24 +1117,29 @@ else
 
 $data = $global:__llm_Data;
 $dialogue = $data.Dialogue;
-$dialogue.SetTools(@($PowerShellTool, $GrepTool, $ReadFileTool, $WriteFileTool, $EditFileTool, $GlobTool));
+if ($NoTools) { $dialogue.SetTools(@()); }
+else { $dialogue.SetTools(@($PowerShellTool, $GrepTool, $ReadFileTool, $WriteFileTool, $EditFileTool, $GlobTool)); }
 $dialogue.SetSearch($Search);
 $dialogue.SetThink(-not $Quick);
 
-if ($Reset -or $ShowHistory)
+if ($Reset)
 {
-    if ($ShowHistory)
-    {
-        Write-Output $dialogue.History;
-    }
-    if ($Reset)
-    {
-        $dialogue.Clear();
-        $data.LastLocation = $null;
-        Write-LLM_Status '> [!NOTE] Context cleared successfully.';
-    }
+    $dialogue.Clear();
+    $data.LastLocation = $null;
+    Write-LLM_Status '> [!NOTE] Context cleared successfully.';
+    if ($Session) { Export-LLM_Session -Dialogue $dialogue -Path $Session; }
     exit;
 }
+
+if ($Session -and -not $OneShot)
+{
+    if (Test-Path -LiteralPath $Session) { Import-LLM_Session -Dialogue $dialogue -Path $Session; }
+    else { Export-LLM_Session -Dialogue $dialogue -Path $Session; }
+}
+
+# Turn body: the finally block persists the session even on Ctrl+C.
+$saveDialogue = $null;
+try {
 
 $dialogue.Compact({
     param($message)
@@ -1159,53 +1164,96 @@ else
     $Prompt = "$Prompt";
 }
 
-$currentLocation = (Get-Location).Path;
-$stateAge = [datetime]::Now - $data.LastStateTime;
-if ($currentLocation -ne $data.LastLocation -or $stateAge -gt [timespan]::FromHours(1))
+if ($OneShot)
 {
-    $dialogue.Append('user', (Get-LLM_WorkspaceState));
-    $data.LastLocation = $currentLocation;
-    $data.LastStateTime = [datetime]::Now;
-}
+    $one = New-LLM_Dialogue -Credentials $dialogue.Credentials -SystemPrompt $dialogue.SystemPrompt;
+    $one.SetSearch($Search);
+    $one.SetThink(-not $Quick);
+    if ($NoTools) { $one.SetTools(@()); }
+    else { $one.SetTools(@($PowerShellTool, $GrepTool, $ReadFileTool, $WriteFileTool, $EditFileTool, $GlobTool)); }
 
-$history = Get-History -Count 30 |
-    Where-Object -Property Id -GT $data.LastCommandID |
-    Where-Object { $_.CommandLine -notlike 'llm*' };
+    if ($Session -and (Test-Path -LiteralPath $Session)) { Import-LLM_Session -Dialogue $one -Path $Session; }
+    $saveDialogue = $one;
 
-$lastId = $history | Sort-Object -Property Id | Select-Object -ExpandProperty Id -Last 1;
-if ($lastId) { $data.LastCommandID = $lastId; }
+    if (-not $NoTools)
+    {
+        $one.Append('user', (Get-LLM_WorkspaceState));
 
-if ($history)
-{
-    $historyLines = $history | ForEach-Object {
-        [string]::Format("{0}`t{1}", $_.StartExecutionTime.ToString('HH:mm'), $_.CommandLine)
-    };
-    $dialogue.Append('user', $historyLines -join "`n");
-}
+        $onceHistory = Get-History -Count 30 |
+            Where-Object { $_.CommandLine -notlike 'llm*' };
+        if ($onceHistory)
+        {
+            $onceLines = $onceHistory | ForEach-Object {
+                [string]::Format("{0}`t{1}", $_.StartExecutionTime.ToString('HH:mm'), $_.CommandLine)
+            };
+            $one.Append('user', ($onceLines -join "`n"));
+        }
+    }
 
-$response = $null;
-if (-not $Raw -and -not $AsDialogue)
-{
-    $promptPreview = (("$Prompt" -split "`n")[0]).Trim();
-    if ($promptPreview.Length -gt 120) { $promptPreview = $promptPreview.Substring(0, 117) + '...'; }
-    if (-not $promptPreview) { $promptPreview = '(empty prompt)'; }
-    Write-LLM_Status (('---' + "`n" + '**Prompt:** ' + $promptPreview));
-}
+    $response = $one.Ask($Prompt);
+    if (-not $NoTools)
+    {
+        $toolResponse = Invoke-LLM_ToolLoop -Dialogue $one;
+        if ($null -ne $toolResponse) { $response = $toolResponse; }
+    }
 
-$response = $dialogue.Ask($Prompt);
-$toolResponse = Invoke-LLM_ToolLoop -Dialogue $dialogue;
-if ($null -ne $toolResponse) { $response = $toolResponse; }
-
-if ($AsDialogue)
-{
-    Write-Output $dialogue.History;
-}
-elseif ($Raw)
-{
     Write-Output $response;
+    exit;
 }
-else
+
+if (-not $NoTools)
 {
-    Write-Output ($response | ConvertTo-MD_Ansi);
-    Write-LLM_Status '---';
+    $currentLocation = (Get-Location).Path;
+    $stateAge = [datetime]::Now - $data.LastStateTime;
+    if ($currentLocation -ne $data.LastLocation -or $stateAge -gt [timespan]::FromHours(1))
+    {
+        $dialogue.Append('user', (Get-LLM_WorkspaceState));
+        $data.LastLocation = $currentLocation;
+        $data.LastStateTime = [datetime]::Now;
+    }
+
+    $history = Get-History -Count 30 |
+        Where-Object -Property Id -GT $data.LastCommandID |
+        Where-Object { $_.CommandLine -notlike 'llm*' };
+
+    $lastId = $history | Sort-Object -Property Id | Select-Object -ExpandProperty Id -Last 1;
+    if ($lastId) { $data.LastCommandID = $lastId; }
+
+    if ($history)
+    {
+        $historyLines = $history | ForEach-Object {
+            [string]::Format("{0}`t{1}", $_.StartExecutionTime.ToString('HH:mm'), $_.CommandLine)
+        };
+        $dialogue.Append('user', $historyLines -join "`n");
+    }
+}
+
+$promptPreview = (("$Prompt" -split "`n")[0]).Trim();
+if ($promptPreview.Length -gt 120) { $promptPreview = $promptPreview.Substring(0, 117) + '...'; }
+if (-not $promptPreview) { $promptPreview = '(empty prompt)'; }
+Write-LLM_Status (('---' + "`n" + '**Prompt:** ' + $promptPreview));
+
+$saveDialogue = $dialogue;
+$response = $dialogue.Ask($Prompt);
+if (-not $NoTools)
+{
+    $toolResponse = Invoke-LLM_ToolLoop -Dialogue $dialogue;
+    if ($null -ne $toolResponse) { $response = $toolResponse; }
+}
+
+Write-Output ($response | ConvertTo-MD_Ansi);
+Write-LLM_Status '---';
+}
+finally
+{
+    if ($null -ne $saveDialogue)
+    {
+        Repair-LLM_HistoryTail -Dialogue $saveDialogue;
+        $saveDialogue.PendingToolCalls = @();
+        if ($Session)
+        {
+            try { Export-LLM_Session -Dialogue $saveDialogue -Path $Session; }
+            catch { Write-Warning "could not save session file: $Session"; }
+        }
+    }
 }

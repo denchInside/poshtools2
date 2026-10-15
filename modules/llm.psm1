@@ -501,6 +501,149 @@ function Sync-LLM_DialogueCredentialsFromFile(
     return Sync-LLM_DialogueCredentials -Dialogue $Dialogue -Credentials $save;
 }
 
+function Export-LLM_Session(
+    $Dialogue,
+    [string] $Path
+)
+{
+    <#
+    .SYNOPSIS
+        Persists a dialogue's history to a JSON session file.
+    .PARAMETER Dialogue
+        The LLM_Dialogue whose History should be saved.
+    .PARAMETER Path
+        Destination file path. Missing parent directories are created.
+    #>
+
+    if ($null -eq $Dialogue -or -not $Path)
+    {
+        throw [System.ArgumentException]::new('dialogue and path are required');
+    }
+
+    $entries = @($Dialogue.History | ForEach-Object {
+        $entry = [ordered]@{
+            role = $_.role
+            content = $_.content
+            time = ([datetime]$_.time).ToString('o')
+        };
+
+        if ($null -ne $_.tool_call_id) { $entry.tool_call_id = $_.tool_call_id; }
+        if ($null -ne $_.name) { $entry.name = $_.name; }
+        if ($null -ne $_.tool_calls) { $entry.tool_calls = $_.tool_calls; }
+
+        [pscustomobject]$entry
+    });
+
+    $full = [System.IO.Path]::IsPathRooted($Path) ? $Path : (Join-Path (Get-Location).Path $Path);
+    $dir = [System.IO.Path]::GetDirectoryName($full);
+    if ($dir -and -not [File]::Exists($dir))
+    {
+        $null = New-Item -Path $dir -ItemType Directory -Force -ErrorAction Stop;
+    }
+
+    [ordered]@{ version = 1; history = $entries } |
+        ConvertTo-Json -Depth 10 |
+        Out-File -LiteralPath "$full.tmp" -Encoding utf8;
+    Move-Item -LiteralPath "$full.tmp" -Destination $full -Force;
+}
+
+function Repair-LLM_HistoryTail($Dialogue)
+{
+    <#
+    .SYNOPSIS
+        Drops a trailing assistant tool-call block whose results never arrived
+        (interrupted turn), keeping everything else. A no-op on complete history.
+    #>
+
+    $entries = @($Dialogue.History);
+
+    for ($i = $entries.Count - 1; $i -ge 0; $i--)
+    {
+        if ($entries[$i].role -ne 'assistant' -or -not $entries[$i].tool_calls) { continue; }
+
+        $ids = @($entries[$i].tool_calls | ForEach-Object { $_.id });
+        $have = @($entries | Select-Object -Skip ($i + 1) | Where-Object { $_.role -eq 'tool' } | ForEach-Object { $_.tool_call_id });
+        $missing = @($ids | Where-Object { $_ -notin $have });
+
+        if ($missing.Count -gt 0)
+        {
+            while ($Dialogue.History.Count -gt $i) { $Dialogue.History.RemoveLast(); }
+        }
+
+        break;
+    }
+}
+
+function Import-LLM_Session(
+    $Dialogue,
+    [string] $Path
+)
+{
+    <#
+    .SYNOPSIS
+        Replaces a dialogue's history with the contents of a JSON session file.
+    .PARAMETER Dialogue
+        The LLM_Dialogue whose History should be replaced.
+    .PARAMETER Path
+        Source file path previously written by Export-LLM_Session.
+    #>
+
+    if ($null -eq $Dialogue -or -not $Path)
+    {
+        throw [System.ArgumentException]::new('dialogue and path are required');
+    }
+
+    try
+    {
+        $doc = Get-Content -LiteralPath $Path -Raw -Encoding utf8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop;
+    }
+    catch
+    {
+        throw "session file is corrupted: $Path ($($_.Exception.Message))";
+    }
+
+    $validRoles = @('system', 'user', 'assistant', 'tool');
+    $items = @($doc.history);
+    if ($doc.version -ne 1 -or $null -eq $doc.history)
+    {
+        throw "session file is corrupted: $Path (bad version or history)";
+    }
+
+    $restored = [System.Collections.Generic.List[pscustomobject]]::new();
+    foreach ($item in $items)
+    {
+        if ($item.role -notin $validRoles -or $null -eq $item.content)
+        {
+            throw "session file is corrupted: $Path (invalid history entry)";
+        }
+
+        try
+        {
+            $time = [datetime]$item.time;
+        }
+        catch
+        {
+            throw "session file is corrupted: $Path (invalid timestamp)";
+        }
+
+        $entry = [pscustomobject]@{
+            role = [string]$item.role
+            content = [string]$item.content
+            time = $time
+        };
+
+        if ($null -ne $item.tool_call_id) { $entry | Add-Member -NotePropertyName 'tool_call_id' -NotePropertyValue ([string]$item.tool_call_id); }
+        if ($null -ne $item.name) { $entry | Add-Member -NotePropertyName 'name' -NotePropertyValue ([string]$item.name); }
+        if ($null -ne $item.tool_calls) { $entry | Add-Member -NotePropertyName 'tool_calls' -NotePropertyValue $item.tool_calls; }
+
+        $restored.Add($entry);
+    }
+
+    $Dialogue.History.Clear();
+    $Dialogue.PendingToolCalls = @();
+    foreach ($entry in $restored) { $Dialogue.History.Add($entry); }
+}
+
 function Get-LLM_WorkspaceState()
 {
     <#
@@ -522,4 +665,4 @@ function Get-LLM_WorkspaceState()
     return $line;
 }
 
-Export-ModuleMember -Function New-LLM_Dialogue, Get-LLM_Credentials, Get-LLM_WorkspaceState, Test-LLM_CredentialsEqual, Sync-LLM_DialogueCredentials, Sync-LLM_DialogueCredentialsFromFile;
+Export-ModuleMember -Function New-LLM_Dialogue, Get-LLM_Credentials, Get-LLM_WorkspaceState, Test-LLM_CredentialsEqual, Sync-LLM_DialogueCredentials, Sync-LLM_DialogueCredentialsFromFile, Export-LLM_Session, Import-LLM_Session, Repair-LLM_HistoryTail;
