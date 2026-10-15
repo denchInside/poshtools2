@@ -54,6 +54,30 @@ Runs one PowerShell 7 command on the user's machine and returns its combined out
 - Before destructive or hard-to-undo operations (Remove-Item, overwriting files, Stop-Process, registry or system changes, git reset or clean), first show what will be affected and use -WhatIf where the cmdlet supports it. Act only on what the user asked for. Never run recursive or forced deletes on broad paths.
 - Do not read or print secrets (tokens, passwords, private keys, .env contents) unless the task requires it. Never send them anywhere.
 - Do not work around an approval or a denial by rewording, splitting, or wrapping a denied command.
+- For file work prefer the dedicated tools over powershell. Never use powershell to read, search, write, or patch files when a dedicated tool exists.
+
+TOOL: grep
+Searches file contents with a .NET regex and returns numbered matches.
+- path accepts a file or a directory. A directory is searched recursively.
+- include optionally limits directory searches to a file name glob such as *.ps1.
+- Output uses the same numbering as read_file: single file shows " <num>  text", directory search shows "rel/path: <num>  text".
+- Use it to locate lines, then use read_file with offset/limit to see surrounding context.
+
+TOOL: read_file
+Returns file contents with 1-based line numbers in the form "{number,5}  text", like `cat | nl`.
+- Takes path, offset (1-based, default 1), and limit (default 500). Large files are truncated with a "[lines X-Y of Z]" footer; page with offset/limit.
+- Read-only and auto-approved. Re-read a file before building an edit_file diff, and after any failed patch or external change.
+
+TOOL: write_file
+Overwrites the file at path with the given content (UTF-8). Missing parent directories are created.
+- Shown to the user for approval before writing. State what will be overwritten.
+- Use for new files or full rewrites. Use edit_file for small changes to an existing file.
+
+TOOL: edit_file
+Applies a unified diff to the file at path. Headers (---/+++) are accepted but ignored; one or more "@@ -a,b +c,d @@" hunks are applied strictly.
+- Lines in the diff start with ' ' (context), '-' (remove), or '+' (add). Every context and removal line must match the file byte-for-byte (case-sensitive, no fuzz, no offsets).
+- Shown to the user for approval before applying. The change is atomic: on any mismatch nothing is written.
+- If the result starts with "patch failed", do not retry the same diff. Re-read the file with read_file, rebuild the diff from the fresh numbers, and try again.
 
 DENIALS AND ERRORS
 - If a tool result begins with "User denied execution", the reason after "LISTEN TO THE USER" overrides your plan. Do not retry the same or an equivalent command. Adjust to the reason, or ask what they would prefer. If the reason is "Stop executing commands immediately", stop and ask what they want instead.
@@ -110,6 +134,106 @@ $PowerShellTool = [pscustomobject]@{
                 }
             }
             required = @('command')
+        }
+    }
+}
+
+$GrepTool = [pscustomobject]@{
+    type = 'function'
+    function = [pscustomobject]@{
+        name = 'grep'
+        description = 'Search file contents with a .NET regex. path accepts a file or a directory (directories are searched recursively). Returns matches with line numbers like read_file.'
+        parameters = [pscustomobject]@{
+            type = 'object'
+            properties = [pscustomobject]@{
+                pattern = [pscustomobject]@{
+                    type = 'string'
+                    description = 'The .NET regex pattern to search for.'
+                }
+                path = [pscustomobject]@{
+                    type = 'string'
+                    description = 'File or directory to search. Defaults to the current directory.'
+                }
+                include = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Optional file name glob for directory searches, e.g. *.ps1.'
+                }
+                caseSensitive = [pscustomobject]@{
+                    type = 'boolean'
+                    description = 'Use case-sensitive matching. Defaults to false.'
+                }
+            }
+            required = @('pattern')
+        }
+    }
+}
+
+$ReadFileTool = [pscustomobject]@{
+    type = 'function'
+    function = [pscustomobject]@{
+        name = 'read_file'
+        description = 'Read a file with 1-based line numbers, like cat piped to nl. Supports paging with offset and limit.'
+        parameters = [pscustomobject]@{
+            type = 'object'
+            properties = [pscustomobject]@{
+                path = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Path to the file to read.'
+                }
+                offset = [pscustomobject]@{
+                    type = 'integer'
+                    description = '1-based first line to return. Defaults to 1.'
+                }
+                limit = [pscustomobject]@{
+                    type = 'integer'
+                    description = 'Maximum lines to return. Defaults to 500.'
+                }
+            }
+            required = @('path')
+        }
+    }
+}
+
+$WriteFileTool = [pscustomobject]@{
+    type = 'function'
+    function = [pscustomobject]@{
+        name = 'write_file'
+        description = 'Overwrite a file with the given content (UTF-8). Missing parent directories are created. Requires user approval.'
+        parameters = [pscustomobject]@{
+            type = 'object'
+            properties = [pscustomobject]@{
+                path = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Path of the file to write.'
+                }
+                content = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Full new content of the file.'
+                }
+            }
+            required = @('path', 'content')
+        }
+    }
+}
+
+$EditFileTool = [pscustomobject]@{
+    type = 'function'
+    function = [pscustomobject]@{
+        name = 'edit_file'
+        description = 'Apply a unified diff to a file. Hunks look like @@ -a,b +c,d @@ with lines starting with space (context), - (remove), or + (add). Matching is strict with no fuzz. Requires user approval.'
+        parameters = [pscustomobject]@{
+            type = 'object'
+            properties = [pscustomobject]@{
+                path = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Path of the file to patch.'
+                }
+                diff = [pscustomobject]@{
+                    type = 'string'
+                    description = 'Unified diff to apply.'
+                }
+            }
+            required = @('path', 'diff')
         }
     }
 }
@@ -314,6 +438,491 @@ function Invoke-LLM_PowerShellTool([string] $Command)
     return $output;
 }
 
+function Format-LLM_NumberedLine([int] $Number, [string] $Text)
+{
+    return ('{0,5}  {1}' -f $Number, $Text);
+}
+
+function Get-LLM_FullPath([string] $Path)
+{
+    if ([System.IO.Path]::IsPathRooted($Path))
+    {
+        return $Path;
+    }
+
+    return (Join-Path (Get-Location).Path $Path);
+}
+
+function Get-LLM_DisplayPath([string] $FullPath)
+{
+    try
+    {
+        $cwd = (Get-Location).Path;
+        if ($FullPath.StartsWith($cwd, [System.StringComparison]::OrdinalIgnoreCase))
+        {
+            $rel = $FullPath.Substring($cwd.Length).TrimStart('\', '/');
+            if ($rel) { return $rel; }
+        }
+    }
+    catch { }
+
+    return $FullPath;
+}
+
+function Limit-LLM_Text([string] $Text)
+{
+    $limit = 20000;
+    if ($Text -and $Text.Length -gt $limit)
+    {
+        $half = [int]($limit / 2);
+        $omitted = $Text.Length - $limit;
+        return $Text.Substring(0, $half) + "`n[$omitted characters omitted]`n" + $Text.Substring($Text.Length - $half);
+    }
+
+    return $Text;
+}
+
+function Request-LLM_WriteApproval([string] $Kind, [string] $DisplayPath, [string] $Fence, [string[]] $Preview, [string] $Summary)
+{
+    $body = @("**MODEL WANTS TO RUN ($Kind):** $DisplayPath");
+    if ($Summary) { $body += '', $Summary; }
+    $body += '', "```$Fence" + "`n" + ($Preview -join "`n") + "`n" + '```';
+    $message = ($body -join "`n");
+
+    if ($script:LLM_AutoApprove)
+    {
+        Write-LLM_Status (($message -replace 'MODEL WANTS TO RUN', 'RUNNING (auto-approved)'));
+        return $null;
+    }
+
+    Write-LLM_Status $message;
+
+    $decision = Read-UserChoice -Question 'Approve? (a = auto-approve rest of turn)' -Format 'Y/n/a' -Equals '';
+
+    switch ($decision)
+    {
+        'y'
+        {
+            return $null;
+        }
+        'a'
+        {
+            $script:LLM_AutoApprove = $true;
+            Write-LLM_Status '> [!NOTE] Auto-approval enabled for this turn.';
+            return $null;
+        }
+        default
+        {
+            $feedback = Read-Input_Multiline -Prompt 'Denied. Tell it why (optional)';
+            if (-not $feedback) { $feedback = 'Stop executing commands immediately'; }
+            return "User denied execution. LISTEN TO THE USER: $feedback";
+        }
+    }
+}
+
+function Invoke-LLM_GrepTool($Arguments)
+{
+    $pattern = $Arguments.pattern;
+    if (-not $pattern) { return 'Missing required argument: pattern'; }
+
+    $searchPath = ($null -ne $Arguments.path -and "$($Arguments.path)" -ne '') ? "$($Arguments.path)" : '.';
+    $include = ($null -ne $Arguments.include -and "$($Arguments.include)" -ne '') ? "$($Arguments.include)" : $null;
+    $caseSensitive = ($Arguments.caseSensitive -eq $true);
+
+    try { $null = [regex]::new("$pattern"); }
+    catch { return "Invalid regex pattern: $($_.Exception.Message)"; }
+
+    $full = Get-LLM_FullPath -Path $searchPath;
+    if (-not (Test-Path -LiteralPath $full))
+    {
+        return "Path not found: $searchPath";
+    }
+
+    Write-LLM_Status ((@('**RUNNING (read-only, auto-approved):** grep', '', '```text', "pattern: $pattern", "path: $searchPath" + ($include ? ", include: $include" : ''), '```') -join "`n"));
+
+    try
+    {
+        $item = Get-Item -LiteralPath $full -ErrorAction Stop;
+    }
+    catch
+    {
+        return "Could not access path: $searchPath";
+    }
+
+    try
+    {
+        if (-not $item.PSIsContainer)
+        {
+            $files = @($item);
+            $isDir = $false;
+        }
+        else
+        {
+            $isDir = $true;
+            $files = @(Get-ChildItem -LiteralPath $full -Recurse -File -ErrorAction Stop | Where-Object { $_.FullName -notlike '*\.git\*' });
+            if ($include)
+            {
+                $files = @($files | Where-Object { $_.Name -like $include });
+            }
+            if ($files.Count -eq 0)
+            {
+                return '(no matches)';
+            }
+        }
+
+        $max = 200;
+        $lines = [System.Collections.Generic.List[string]]::new();
+        $extra = 0;
+
+        foreach ($file in $files)
+        {
+            $matches = $null;
+            try
+            {
+                if ($caseSensitive)
+                {
+                    $matches = @(Select-String -Pattern "$pattern" -LiteralPath $file.FullName -CaseSensitive -ErrorAction Stop);
+                }
+                else
+                {
+                    $matches = @(Select-String -Pattern "$pattern" -LiteralPath $file.FullName -ErrorAction Stop);
+                }
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach ($m in $matches)
+            {
+                $numbered = Format-LLM_NumberedLine -Number $m.LineNumber -Text "$($m.Line)";
+                if ($isDir)
+                {
+                    $rel = Get-LLM_DisplayPath -FullPath $m.Path;
+                    $entry = "${rel}:$numbered";
+                }
+                else
+                {
+                    $entry = $numbered;
+                }
+
+                if ($lines.Count -lt $max)
+                {
+                    $lines.Add($entry);
+                }
+                else
+                {
+                    $extra++;
+                }
+            }
+        }
+
+        if ($lines.Count -eq 0 -and $extra -eq 0)
+        {
+            return '(no matches)';
+        }
+
+        $text = ($lines -join "`n");
+        if ($extra -gt 0)
+        {
+            $text += "`n[... $extra more matches omitted, refine pattern/include]";
+        }
+
+        return Limit-LLM_Text -Text $text;
+    }
+    catch
+    {
+        return "grep failed: $_";
+    }
+}
+
+function Invoke-LLM_ReadFileTool($Arguments)
+{
+    $pathStr = ($null -ne $Arguments.path) ? "$($Arguments.path)" : '';
+    if (-not $pathStr) { return 'Missing required argument: path'; }
+
+    $offset = ($null -ne $Arguments.offset) ? [int]$Arguments.offset : 1;
+    $limit = ($null -ne $Arguments.limit) ? [int]$Arguments.limit : 500;
+    if ($offset -lt 1) { return 'Invalid argument: offset must be >= 1'; }
+    if ($limit -lt 1) { return 'Invalid argument: limit must be >= 1'; }
+
+    $full = Get-LLM_FullPath -Path $pathStr;
+    if (-not (Test-Path -LiteralPath $full))
+    {
+        return "File not found: $pathStr";
+    }
+
+    Write-LLM_Status ((@('**RUNNING (read-only, auto-approved):** read_file', '', '```text', "$pathStr (offset $offset, limit $limit)", '```') -join "`n"));
+
+    try
+    {
+        $item = Get-Item -LiteralPath $full -ErrorAction Stop;
+        if ($item.PSIsContainer) { return "Not a file: $pathStr"; }
+
+        $content = @(Get-Content -LiteralPath $full -ErrorAction Stop);
+        $total = $content.Count;
+        if ($total -eq 0) { return '(empty file)'; }
+        if ($offset -gt $total) { return "offset $offset is beyond end of file ($total lines)"; }
+
+        $end = [Math]::Min($total, $offset + $limit - 1);
+        $out = [System.Collections.Generic.List[string]]::new();
+        for ($n = $offset; $n -le $end; $n++)
+        {
+            $out.Add((Format-LLM_NumberedLine -Number $n -Text "$($content[$n - 1])"));
+        }
+
+        $text = ($out -join "`n");
+        if ($offset -ne 1 -or $end -ne $total)
+        {
+            $text += "`n[lines $offset-$end of $total]";
+        }
+
+        return Limit-LLM_Text -Text $text;
+    }
+    catch
+    {
+        return "Could not read file: $pathStr";
+    }
+}
+
+function Invoke-LLM_WriteFileTool($Arguments)
+{
+    $hasPath = ($null -ne $Arguments.PSObject.Properties['path']) -and ("$($Arguments.path)" -ne '');
+    $hasContent = ($null -ne $Arguments.PSObject.Properties['content']);
+    if (-not $hasPath) { return 'Missing required argument: path'; }
+    if (-not $hasContent) { return 'Missing required argument: content'; }
+
+    $pathStr = "$($Arguments.path)";
+    $content = "$($Arguments.content)";
+    $full = Get-LLM_FullPath -Path $pathStr;
+
+    $split = @($content -split "`n");
+    $lineCount = ($content -eq '') ? 0 : $split.Count;
+    $byteCount = [System.Text.Encoding]::UTF8.GetByteCount($content);
+    $preview = @($split | Select-Object -First 20 | ForEach-Object { "$_".TrimEnd("`r") });
+    if ($split.Count -gt 20) { $preview += '...'; }
+    if ($preview.Count -eq 0) { $preview = @('(empty content)'); }
+
+    $denial = Request-LLM_WriteApproval -Kind 'write_file' -DisplayPath $pathStr -Fence '' -Preview $preview -Summary "$lineCount lines, $byteCount bytes (overwrites)";
+    if ($denial) { return $denial; }
+
+    try
+    {
+        $parent = Split-Path -Parent $full;
+        if ($parent -and -not (Test-Path -LiteralPath $parent))
+        {
+            $null = New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop;
+        }
+
+        [System.IO.File]::WriteAllText($full, $content, [System.Text.UTF8Encoding]::new($false));
+        return "wrote $lineCount lines ($byteCount bytes) to $pathStr";
+    }
+    catch
+    {
+        return "Could not write file: $pathStr";
+    }
+}
+
+function Invoke-LLM_EditFileTool($Arguments)
+{
+    $pathStr = ($null -ne $Arguments.path) ? "$($Arguments.path)" : '';
+    $diff = ($null -ne $Arguments.diff) ? "$($Arguments.diff)" : '';
+    if (-not $pathStr) { return 'Missing required argument: path'; }
+    if (-not $diff) { return 'Missing required argument: diff'; }
+
+    $full = Get-LLM_FullPath -Path $pathStr;
+    if (-not (Test-Path -LiteralPath $full))
+    {
+        return "File not found: $pathStr";
+    }
+
+    try
+    {
+        $item = Get-Item -LiteralPath $full -ErrorAction Stop;
+        if ($item.PSIsContainer) { return "Not a file: $pathStr"; }
+
+        $rawBytes = [System.IO.File]::ReadAllBytes($full);
+        $hasBom = ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF);
+        $raw = [System.IO.File]::ReadAllText($full);
+
+        $eol = $raw.Contains("`r`n") ? "`r`n" : "`n";
+        $trailing = ($raw.Length -gt 0) -and $raw.EndsWith("`n");
+        if ($raw -eq '')
+        {
+            $fileLines = @();
+        }
+        else
+        {
+            $parts = @($raw -split "`r?`n");
+            if ($trailing -and $parts.Count -gt 0 -and $parts[-1] -eq '')
+            {
+                $parts = @($parts | Select-Object -SkipLast 1);
+            }
+            $fileLines = @($parts);
+        }
+
+        $diffLines = @($diff -split "`r?`n");
+        $hunks = [System.Collections.Generic.List[pscustomobject]]::new();
+        $current = $null;
+        $hunkIndex = 0;
+
+        foreach ($dl in $diffLines)
+        {
+            $hm = [regex]::Match($dl, '^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@');
+            if ($hm.Success)
+            {
+                $hunkIndex++;
+                $current = [pscustomobject]@{
+                    Index = $hunkIndex
+                    OldStart = [int]$hm.Groups[1].Value
+                    OldCount = $hm.Groups[2].Success ? [int]$hm.Groups[2].Value : 1
+                    NewStart = [int]$hm.Groups[3].Value
+                    NewCount = $hm.Groups[4].Success ? [int]$hm.Groups[4].Value : 1
+                    Lines = [System.Collections.Generic.List[string]]::new()
+                };
+                $hunks.Add($current);
+                continue;
+            }
+
+            if ($dl.StartsWith('--- ') -or $dl.StartsWith('+++ ') -or $dl.StartsWith('diff --git') -or $dl.StartsWith('index '))
+            {
+                continue;
+            }
+
+            if ($null -eq $current)
+            {
+                if ($dl.Trim() -eq '') { continue; }
+                return "Invalid diff: content before first @@ hunk: '$dl'";
+            }
+
+            $current.Lines.Add($dl);
+        }
+
+        if ($hunks.Count -eq 0)
+        {
+            return 'Invalid diff: no @@ hunks found';
+        }
+
+        $out = [System.Collections.Generic.List[string]]::new();
+        $pos = 0;
+
+        foreach ($h in $hunks)
+        {
+            if ($h.OldStart -lt 1)
+            {
+                return "Invalid diff: hunk $($h.Index) has invalid old start $($h.OldStart)";
+            }
+
+            $startIdx = $h.OldStart - 1;
+            if ($startIdx -lt $pos)
+            {
+                return "Invalid diff: hunk $($h.Index) overlaps previous hunk";
+            }
+            if ($startIdx -gt $fileLines.Count)
+            {
+                return "Invalid diff: hunk $($h.Index) starts beyond end of file ($($fileLines.Count) lines)";
+            }
+
+            for ($i = $pos; $i -lt $startIdx; $i++) { $out.Add($fileLines[$i]); }
+
+            $cur = $startIdx;
+            $seenOld = 0;
+            $seenNew = 0;
+
+            foreach ($hl in $h.Lines)
+            {
+                if ($hl.StartsWith('\'))
+                {
+                    continue;
+                }
+                elseif ($hl.StartsWith(' '))
+                {
+                    $exp = $hl.Substring(1);
+                    $seenOld++; $seenNew++;
+                    if ($cur -ge $fileLines.Count)
+                    {
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected '$($exp.Substring(0, [Math]::Min(200, $exp.Length)))' but reached end of file ($($fileLines.Count) lines). Re-read file with read_file before retrying.";
+                    }
+                    if ($fileLines[$cur] -cne $exp)
+                    {
+                        $found = "$($fileLines[$cur])";
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected '$($exp.Substring(0, [Math]::Min(200, $exp.Length)))' found '$($found.Substring(0, [Math]::Min(200, $found.Length)))'. Re-read file with read_file before retrying.";
+                    }
+                    $out.Add($fileLines[$cur]);
+                    $cur++;
+                }
+                elseif ($hl.StartsWith('-'))
+                {
+                    $exp = $hl.Substring(1);
+                    $seenOld++;
+                    if ($cur -ge $fileLines.Count)
+                    {
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected '$($exp.Substring(0, [Math]::Min(200, $exp.Length)))' but reached end of file ($($fileLines.Count) lines). Re-read file with read_file before retrying.";
+                    }
+                    if ($fileLines[$cur] -cne $exp)
+                    {
+                        $found = "$($fileLines[$cur])";
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected '$($exp.Substring(0, [Math]::Min(200, $exp.Length)))' found '$($found.Substring(0, [Math]::Min(200, $found.Length)))'. Re-read file with read_file before retrying.";
+                    }
+                    $cur++;
+                }
+                elseif ($hl.StartsWith('+'))
+                {
+                    $seenNew++;
+                    $out.Add($hl.Substring(1));
+                }
+                elseif ($hl -eq '')
+                {
+                    $seenOld++; $seenNew++;
+                    if ($cur -ge $fileLines.Count)
+                    {
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected empty line but reached end of file ($($fileLines.Count) lines). Re-read file with read_file before retrying.";
+                    }
+                    if ($fileLines[$cur] -cne '')
+                    {
+                        $found = "$($fileLines[$cur])";
+                        return "patch failed at hunk $($h.Index) (line $($cur + 1)): expected empty line found '$($found.Substring(0, [Math]::Min(200, $found.Length)))'. Re-read file with read_file before retrying.";
+                    }
+                    $out.Add($fileLines[$cur]);
+                    $cur++;
+                }
+                else
+                {
+                    return "Invalid diff: hunk $($h.Index) has invalid line '$hl' (must start with ' ', '-', or '+')";
+                }
+            }
+
+            if ($seenOld -ne $h.OldCount)
+            {
+                return "Invalid diff: hunk $($h.Index) header expects $($h.OldCount) old lines but found $seenOld";
+            }
+            if ($seenNew -ne $h.NewCount)
+            {
+                return "Invalid diff: hunk $($h.Index) header expects $($h.NewCount) new lines but found $seenNew";
+            }
+
+            $pos = $cur;
+        }
+
+        for ($i = $pos; $i -lt $fileLines.Count; $i++) { $out.Add($fileLines[$i]); }
+
+        $preview = @($diffLines | Select-Object -First 60);
+        if ($diffLines.Count -gt 60) { $preview += '...'; }
+        $denial = Request-LLM_WriteApproval -Kind 'edit_file' -DisplayPath $pathStr -Fence 'diff' -Preview $preview -Summary "$($hunks.Count) hunk(s)";
+        if ($denial) { return $denial; }
+
+        $newText = ($out -join $eol);
+        if ($trailing -and $out.Count -gt 0) { $newText += $eol; }
+        [System.IO.File]::WriteAllText($full, $newText, [System.Text.UTF8Encoding]::new($hasBom));
+
+        return "patched ${pathStr}: $($hunks.Count) hunk(s) applied, $($out.Count) lines total";
+    }
+    catch
+    {
+        return "Could not patch file: $pathStr";
+    }
+}
+
 function Invoke-LLM_ToolCall($Call)
 {
     try
@@ -335,6 +944,22 @@ function Invoke-LLM_ToolCall($Call)
             }
 
             return Invoke-LLM_PowerShellTool -Command $arguments.command;
+        }
+        'grep'
+        {
+            return Invoke-LLM_GrepTool -Arguments $arguments;
+        }
+        'read_file'
+        {
+            return Invoke-LLM_ReadFileTool -Arguments $arguments;
+        }
+        'write_file'
+        {
+            return Invoke-LLM_WriteFileTool -Arguments $arguments;
+        }
+        'edit_file'
+        {
+            return Invoke-LLM_EditFileTool -Arguments $arguments;
         }
         default
         {
@@ -426,7 +1051,7 @@ if (-not $global:__llm_Data)
 {
     $credentials = Get-LLM_Credentials -FileName $LLM_CredentialsFile -SelectModel:$Model;
     $dialogue = New-LLM_Dialogue -Credentials $credentials -SystemPrompt $($SystemPrompt ? $SystemPrompt : $DefaultSystemPrompt);
-    $dialogue.SetTools(@($PowerShellTool));
+    $dialogue.SetTools(@($PowerShellTool, $GrepTool, $ReadFileTool, $WriteFileTool, $EditFileTool));
     $global:__llm_Data = [pscustomobject]@{
         Dialogue = $dialogue
         LastCommandID = 0
@@ -449,6 +1074,7 @@ else
 
 $data = $global:__llm_Data;
 $dialogue = $data.Dialogue;
+$dialogue.SetTools(@($PowerShellTool, $GrepTool, $ReadFileTool, $WriteFileTool, $EditFileTool));
 $dialogue.SetSearch($Search);
 $dialogue.SetThink($Think);
 
