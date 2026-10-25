@@ -1,10 +1,11 @@
 using namespace System.Collections.Generic;
+using namespace System.Linq;
 
 using module .\modules\ask.psm1;
 
 param(
-    [string] $Entry,
-    [string] $Pattern,
+    [string] $Text,
+    [switch] $Exact,
     [int] $Last = -1,
     [switch] $Compress
 );
@@ -12,7 +13,7 @@ param(
 $ErrorActionPreference = 'Stop';
 $historyFile = "$env:AppData\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt";
 
-$historyContents = @(
+[string[]] $historyContents = @(
     Get-Content -LiteralPath $historyFile -ErrorAction SilentlyContinue
 );
 
@@ -23,13 +24,13 @@ if (-not $historyContents)
 
 [Array]::Reverse($historyContents);
 $uncompressedCount = $historyContents.Count;
-$historyContents = $historyContents | Select-Object -Unique
+$historyContents = [Enumerable]::Distinct($historyContents);
 
-if ($Entry -or $Pattern)
+if ($Text)
 {
     if ($Compress)
     {
-        Write-Host "Cannot combine -Compress with -Entry or -Pattern.";
+        Write-Host "Cannot combine -Compress with -Text.";
         exit 1;
     }
 
@@ -38,11 +39,11 @@ if ($Entry -or $Pattern)
         $Last = 15;
     }
 
-    $matches = $historyContents | Where-Object {
-        ($Entry -and $_.StartsWith($Entry)) -or ($Pattern -and $_ -like $Pattern)
-    };
+    $matches = $historyContents.Where({
+        (-not $Exact -and $_ -like $Text) -or $_.StartsWith($Text)
+    });
 
-    $matches | Select-Object -First $Last | Out-Host;
+    [Enumerable]::Take($matches, $Last) | Out-Host;
     Write-Host "$($matches.Count) entries found.";
 }
 
@@ -52,7 +53,7 @@ if ($Compress)
 
     if ($Last -ge 0 -and (Read-UserChoice -Question "Limit history to $Last last entries?" -Equals "y"))
     {
-        $historyContents = $historyContents | Select-Object -Last $Last;
+        $historyContents = [Enumerable]::TakeLast($historyContents, $Last);
     }
 
     $historyContents | Out-File -LiteralPath $historyFile -Encoding utf8;
